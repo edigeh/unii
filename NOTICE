@@ -1,0 +1,15 @@
+unii
+Copyright 2026 edigeh
+
+This product is derived from UniiChat (https://github.com/VictorTaelin/UniiChat),
+by Victor Taelin, licensed under the Apache License, Version 2.0.
+Agent.ts, AskAI.ts, Anthropic.ts, OpenAI.ts, Memory.ts, Machine.ts,
+Computer.ts, Computer.swift, Config.ts, Pick.ts, Price.ts, Disk.ts, Clip.ts,
+Call.ts, Md.ts, Names.ts, prompt.txt, Machine.test.ts and Md.test.ts come from
+UniiChat, some of them modified to run the chat in one local process and to
+sign in through oh-my-pi.
+
+The terminal interface (Keys.ts, Editor.ts, Render.ts, Draw.ts, Tui.ts)
+follows the design of the interactive mode of oh-my-pi
+(https://github.com/can1357/oh-my-pi, MIT License) and is written for this
+project; it contains no code copied from oh-my-pi.

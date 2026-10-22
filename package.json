@@ -1,0 +1,8 @@
+{
+  "name": "unii",
+  "private": true,
+  "bin": { "unii": "bin/unii" },
+  "scripts": {
+    "test": "bun test --isolate"
+  }
+}

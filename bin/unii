@@ -1,0 +1,20 @@
+#!/bin/sh
+# unii: the terminal coding harness (unii.ts), one process holding the
+# chat, its memory tree and the agent loop; no server. The terminal's
+# settings are kept as they were before it starts and set back when it
+# ends, however it ends (a kill -9 too, which no handler of its sees).
+#   unii [args]   the chat (`unii --help` lists the args)
+REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+if [ -t 0 ]; then
+  SAVED="$(stty -g)"
+fi
+bun "$REPO/unii.ts" "$@"
+CODE=$?
+if [ -n "$SAVED" ]; then
+  stty "$SAVED"
+  # kitty keys, modifyOtherKeys, bracketed paste off; the cursor shown
+  if [ "$CODE" -gt 128 ]; then
+    printf '\033[<u\033[>4;0m\033[?2004l\033[?25h\033[0m\r\n' >/dev/tty
+  fi
+fi
+exit "$CODE"
