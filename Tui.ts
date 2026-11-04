@@ -28,7 +28,7 @@ import { Damaged, Memory } from "./Memory.ts";
 import { Pick, type Model } from "./Pick.ts";
 import { Price } from "./Price.ts";
 import { Render } from "./Render.ts";
-import { ERRORS, Store, type Session } from "./Store.ts";
+import { Store, type Session } from "./Store.ts";
 
 // Types
 // =====
@@ -265,7 +265,7 @@ export namespace Tui {
       if (err instanceof Damaged) {
         throw new Error(opened + "its files are damaged: " + err.message, { cause: err });
       }
-      if (system(err)) {
+      if (Store.system(err)) {
         throw new Error(opened + err.message, { cause: err });
       }
       throw err;
@@ -331,13 +331,11 @@ export namespace Tui {
   // (Tui.attach)
   export function attempt(t: Tui, run: () => void | Promise<void>): void {
     new Promise<void>((ok) => ok(run())).catch((err) => {
-      const logged = Store.log_error(err);
+      const text = Store.report(err);
       if (t.closing) {
         throw err;
       }
-      const text = String(err?.message ?? err);
-      const actionable = err instanceof Error && err.name === "Error" || system(err);
-      Tui.note(t, actionable ? text : text + " (a bug in unii" + (logged ? "; its stack is in " + home(ERRORS) : "") + ")");
+      Tui.note(t, text);
     });
   }
 
@@ -617,7 +615,7 @@ export namespace Tui {
       value: s.dir,
     }));
     t.menu = {
-      title: "Sessions in " + home(t.session.cwd), all, at: 0, query: "",
+      title: "Sessions in " + Store.tilde(t.session.cwd), all, at: 0, query: "",
       done: (dir) => {
         const s = dir === null ? null : Store.read(dir);
         if (s !== null && s.id !== t.session.id) {
@@ -731,7 +729,7 @@ export namespace Tui {
   export function frame_lines(t: Tui): string[] {
     const w = Tui.cols(t);
     const out: string[] = [];
-    out.push(paint_dim("unii · " + home(t.session.cwd) + " · session " + t.session.id + (t.earlier > 0 ? " · " + t.earlier + " earlier lines in its memory" : ""), w));
+    out.push(paint_dim("unii · " + Store.tilde(t.session.cwd) + " · session " + t.session.id + (t.earlier > 0 ? " · " + t.earlier + " earlier lines in its memory" : ""), w));
     out.push("");
     for (const [k, item] of t.items.entries()) {
       const next = t.items[k + 1];
@@ -869,7 +867,7 @@ export namespace Tui {
       chat.pick.model + " " + chat.pick.effort + (chat.pick.speed === "slow" ? "" : " " + chat.pick.speed),
       "ctx " + tokens(use.context),
       "≈$" + (use.micros / 1e6).toFixed(2) + (plan ? " (plan)" : ""),
-      home(chat.cwd),
+      Store.tilde(chat.cwd),
       ...(chat.mem.goal === null ? [] : ["goal: " + chat.mem.goal]),
     ];
     return paint([[cut(parts.join(" · "), w), S.dim]]);
@@ -933,17 +931,6 @@ function number(n: number): string {
 
 function tokens(n: number): string {
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
-}
-
-// an error of the system (ENOENT, EACCES): it says what to fix. ERR_ codes
-// are Node's own, for a bad value passed: a code bug
-function system(err: any): boolean {
-  return typeof err?.code === "string" && /^E(?!RR_)[A-Z]/.test(err.code);
-}
-
-function home(p: string): string {
-  const h = os.homedir();
-  return p === h ? "~" : p.startsWith(h + "/") ? "~" + p.slice(h.length) : p;
 }
 
 function when(ms: number): string {
