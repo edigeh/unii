@@ -6,7 +6,8 @@
 // message sent mid-turn reaches the model between tool calls, in the same
 // turn; a stop ends a reply and a running command at once, its process
 // group gone; a turn cut by a crash goes on as the chat opens again;
-// summaries build in the background.
+// summaries build in the background; a session that fails to open leaves
+// no file open.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -14,7 +15,7 @@ import * as os from "node:os";
 import { DIR } from "./scratch.stub.ts";
 
 const { Local, TURN } = await import("./Local.ts");
-const { Memory } = await import("./Memory.ts");
+const { Damaged, Memory } = await import("./Memory.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 
 type Hooks = import("./Local.ts").Hooks;
@@ -159,4 +160,23 @@ test("summaries build in the background", async () => {
   expect(Memory.first(chat.mem)).toBe(6);
   expect(Memory.node(chat.mem, { l: 0, i: 0 })).toStartWith("line: Compaction");
   await Local.close(chat);
+});
+
+test("a session that fails to open leaves no file open, however many times it is tried", async () => {
+  STUB.script = () => [{ t: "text", x: "fine" }];
+  const dir = DIR + "/s8";
+  const first = Local.open(dir, CWD, hooks());
+  Local.say(first, "a message");
+  await idle(first);
+  await Local.close(first);
+  const file = dir + "/main/" + fs.readdirSync(dir + "/main")[0];
+  const lines = fs.readFileSync(file, "utf8").trimEnd().split("\n");
+  lines[lines.length - 1] = "x".repeat(lines.at(-1)!.length);
+  fs.writeFileSync(file, lines.join("\n") + "\n");
+  const open = () => fs.readdirSync("/dev/fd").length;
+  const before = open();
+  for (let k = 0; k < 50; k++) {
+    expect(() => Local.open(dir, CWD, hooks())).toThrow(Damaged);
+  }
+  expect(open()).toBeLessThanOrEqual(before);
 });
