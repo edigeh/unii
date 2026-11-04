@@ -99,13 +99,10 @@ test("latest: the newest session no live unii holds, print runs aside", () => {
   expect(fs.existsSync(a.dir + "/lock")).toBe(false);
 });
 
-function stale_copy(home: string, name: string, lock?: string): string {
+function stale_copy(home: string, name: string): string {
   const dir = home + "/" + name;
   fs.mkdirSync(dir + "/main", { recursive: true });
   fs.writeFileSync(dir + "/main/2026-01-01.jsonl", "half a copy");
-  if (lock !== undefined) {
-    fs.writeFileSync(dir + "/lock", lock);
-  }
   return dir;
 }
 
@@ -139,23 +136,21 @@ test("an import removes dead imports' copies only: a live one's, and any other d
   const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd4-"));
   const home = Store.home(cwd);
   const live = Bun.spawn(["sleep", "5"]);
-  const dead = stale_copy(home, "dead.part", "999999");
-  const unlocked = stale_copy(home, "unlocked.part");
-  const cut_lock = stale_copy(home, "cut-lock.part", "");
-  const running = stale_copy(home, "running.part", String(live.pid));
+  const dead = stale_copy(home, "dead.999999.part");
+  const unnamed = stale_copy(home, "unnamed.part");
+  const running = stale_copy(home, "running." + live.pid + ".part");
   const other = stale_copy(home, "no-meta-yet");
   Store.bring(SRC, cwd);
   live.kill();
   expect(fs.existsSync(dead), "a dead pid's copy").toBe(false);
-  expect(fs.existsSync(unlocked), "a copy killed before its lock").toBe(false);
-  expect(fs.existsSync(cut_lock), "a copy killed as it wrote its lock").toBe(false);
+  expect(fs.existsSync(unnamed), "a copy naming no pid").toBe(false);
   expect(fs.existsSync(running), "a live pid's copy").toBe(true);
   expect(fs.existsSync(other), "a dir not named .part").toBe(true);
 });
 
 test("a whole copy killed just before its rename is no session", () => {
   const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd5-"));
-  const part = stale_copy(Store.home(cwd), "2026-01-01T00-00-00-000-abcd.part", "999999");
+  const part = stale_copy(Store.home(cwd), "2026-01-01T00-00-00-000-abcd.999999.part");
   fs.writeFileSync(part + "/meta.json", JSON.stringify({ cwd, made: new Date().toISOString() }));
   expect(Store.list(cwd)).toEqual([]);
   expect(Store.latest(cwd)).toBeNull();
@@ -169,6 +164,18 @@ test("an import comes whole under its id, unlocked, with no copy left beside it"
   expect(fs.existsSync(s.dir + "/lock")).toBe(false);
   expect(Store.latest(cwd)!.id).toBe(s.id);
   expect(Store.read(s.dir)!.count).toBe(s.count);
+});
+
+test("an empty lock holds nothing, as its writer died writing it", () => {
+  const s = Store.make(fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd7-")));
+  fs.writeFileSync(s.dir + "/lock", "");
+  expect(Store.holder(s.dir)).toBeNull();
+});
+
+test("a session's count of lines is whole, whatever its index holds", () => {
+  const s = Store.make(fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd8-")));
+  fs.writeFileSync(s.dir + "/main.index", Buffer.alloc(37, 1));
+  expect(Store.read(s.dir)!.count).toBe(2);
 });
 
 test("a failed copy leaves nothing", () => {
