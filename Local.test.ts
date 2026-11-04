@@ -7,7 +7,8 @@
 // turn; a stop ends a reply and a running command at once, its process
 // group gone; a turn cut by a crash goes on as the chat opens again;
 // summaries build in the background; a session that fails to open leaves
-// no file open.
+// no file open; what fails in a turn or a summary is logged with its stack
+// in errors.log, a code bug's note says so, and the chat goes on.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -21,17 +22,32 @@ const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 type Hooks = import("./Local.ts").Hooks;
 
 const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-cwd-"));
+const LOG = DIR + "/errors.log";
 
-function hooks(log: string[] = []): Hooks & { log: string[]; ends: boolean[] } {
+function hooks(log: string[] = []): Hooks & { log: string[]; ends: boolean[]; faults: string[] } {
   const ends: boolean[] = [];
+  const faults: string[] = [];
   return {
-    log, ends,
+    log, ends, faults,
     entry : (m) => log.push(m.kind + ": " + m.text),
     live  : () => {},
     mind  : () => {},
     state : () => {},
     ended : (end) => ends.push(end.ok),
-    fault : () => {},
+    fault : (why) => faults.push(why),
+  };
+}
+
+function logged(): string {
+  return fs.existsSync(LOG) ? fs.readFileSync(LOG, "utf8") : "";
+}
+
+// the next call of of[name] throws, and it is itself again
+function plant(of: any, name: string, err: Error): void {
+  const real = of[name];
+  of[name] = () => {
+    of[name] = real;
+    throw err;
   };
 }
 
@@ -179,4 +195,125 @@ test("a session that fails to open leaves no file open, however many times it is
     expect(() => Local.open(dir, CWD, hooks())).toThrow(Damaged);
   }
   expect(open()).toBeLessThanOrEqual(before);
+});
+
+test("a code bug in a turn says so in its note, errors.log holds its stack, and the next message is answered", async () => {
+  STUB.script = () => [{ t: "text", x: "fine" }];
+  const h = hooks();
+  const chat = Local.open(DIR + "/s9", CWD, h);
+  plant(Local, "tools", new TypeError("planted in a turn"));
+  Local.say(chat, "one");
+  await idle(chat);
+  const note = h.log.at(-1)!;
+  expect(note).toStartWith("note: No reply: planted in a turn");
+  expect(note).toContain("a bug in unii");
+  expect(note).toContain(LOG);
+  expect(logged()).toMatch(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z\nTypeError: planted in a turn\n/);
+  expect(logged()).toContain("Local.test.ts");
+  expect(fs.statSync(LOG).mode & 0o777).toBe(0o600);
+  Local.say(chat, "two");
+  await idle(chat);
+  expect(h.log.at(-1)).toBe("unii: fine");
+  await Local.close(chat);
+});
+
+test("a plain error in a turn keeps its note as it was, and is logged", async () => {
+  const h = hooks();
+  const chat = Local.open(DIR + "/s10", CWD, h);
+  plant(Local, "tools", new Error("planted plain"));
+  Local.say(chat, "one");
+  await idle(chat);
+  expect(h.log.at(-1)).toBe("note: No reply: planted plain. Send a message to try again.");
+  expect(logged()).toContain("Error: planted plain\n");
+  await Local.close(chat);
+});
+
+test("a disk error in a turn keeps its note as it was, is logged, and the chat goes on", async () => {
+  STUB.script = () => [{ t: "text", x: "fine" }];
+  const h = hooks();
+  const chat = Local.open(DIR + "/s11", CWD, h);
+  plant(Memory, "settle", Object.assign(new Error("EACCES: permission denied, open 'the disk'"), { code: "EACCES" }));
+  Local.say(chat, "one");
+  await idle(chat);
+  const note = h.log.at(-1)!;
+  expect(note).toBe("note: No reply: EACCES: permission denied, open 'the disk'. Send a message to try again.");
+  expect(logged()).toContain("open 'the disk'");
+  Local.say(chat, "two");
+  await idle(chat);
+  expect(h.log.at(-1)).toBe("unii: fine");
+  await Local.close(chat);
+});
+
+test("a save refused as a turn ends reaches the terminal as it is, is logged, and the chat goes on as the disk comes back", async () => {
+  STUB.script = (req) => [{ t: "wait", ms: req.last.includes("one") ? 150 : 0 }, { t: "text", x: "fine" }];
+  const h = hooks();
+  const dir = DIR + "/s15";
+  const chat = Local.open(dir, CWD, h);
+  Local.say(chat, "one");
+  fs.chmodSync(dir, 0o555);
+  await idle(chat);
+  await Bun.sleep(20);
+  fs.chmodSync(dir, 0o755);
+  expect(h.faults).toHaveLength(1);
+  expect(h.faults[0]).toStartWith("EACCES");
+  expect(h.faults[0]).not.toContain("a bug in unii");
+  expect(logged()).toContain(dir + "/view.json");
+  Local.say(chat, "two");
+  await idle(chat);
+  expect(h.log.at(-1)).toBe("unii: fine");
+  await Local.close(chat);
+});
+
+test("a code bug as a turn ends reaches the terminal as a bug, with its stack in errors.log", async () => {
+  STUB.script = () => [{ t: "text", x: "fine" }];
+  const h = hooks();
+  const chat = Local.open(DIR + "/s12", CWD, h);
+  const change = Local.change;
+  (Local as any).change = (c: typeof chat) => {
+    if (!c.busy) {
+      (Local as any).change = change;
+      throw new TypeError("planted as a turn ends");
+    }
+    return change(c);
+  };
+  Local.say(chat, "one");
+  await idle(chat);
+  await Bun.sleep(20);
+  expect(h.faults).toHaveLength(1);
+  expect(h.faults[0]).toContain("planted as a turn ends");
+  expect(h.faults[0]).toContain("a bug in unii");
+  expect(h.faults[0]).toContain(LOG);
+  expect(logged()).toContain("TypeError: planted as a turn ends\n");
+  Local.say(chat, "two");
+  await idle(chat);
+  expect(h.log.at(-1)).toBe("unii: fine");
+  await Local.close(chat);
+});
+
+test("a summary's code bug is in errors.log with its stack, and a later try still builds it", async () => {
+  const chat = Local.open(DIR + "/s13", CWD, hooks());
+  plant(Memory, "ask", new TypeError("planted in a summary"));
+  Memory.push(chat.mem, Array.from({ length: 4 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(2000) })));
+  const until = Date.now() + 5000;
+  while (Memory.first(chat.mem) < 4 && Date.now() < until) {
+    await Bun.sleep(10);
+  }
+  expect(logged()).toContain("TypeError: planted in a summary\n");
+  expect(Memory.first(chat.mem)).toBe(4);
+  await Local.close(chat);
+});
+
+test("summaries a stop cuts are no errors", async () => {
+  const chat = Local.open(DIR + "/s14", CWD, hooks());
+  Memory.push(chat.mem, Array.from({ length: 4 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(2000) })));
+  expect(chat.mem.calls.size).toBeGreaterThan(0);
+  const before = logged();
+  await Local.close(chat);
+  const until = Date.now() + 5000;
+  while (chat.mem.busy.size > 0 && Date.now() < until) {
+    await Bun.sleep(5);
+  }
+  await Bun.sleep(20);
+  expect(chat.mem.busy.size).toBe(0);
+  expect(logged()).toBe(before);
 });
