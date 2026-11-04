@@ -192,6 +192,10 @@ of them from there too.
 // Memory
 // ======
 
+// a chat's file holding a value no write of ours could have left; `message`
+// says which file and how. Thrown where the value is read
+export class Damaged extends Error {}
+
 export namespace Memory {
 
   export function load(dir: string, share: Memory["share"], acted: Memory["acted"] = () => {}): Memory {
@@ -207,6 +211,9 @@ export namespace Memory {
     mem.ends.main = Memory.index(mem, "main", saved?.main ?? [0, 0]);
     mem.ends.tree = Memory.index(mem, "tree", saved?.tree ?? [0, 0]);
     mem.count = fs.statSync(dir + "/main.index").size / SLOT;
+    if (!Number.isInteger(mem.count)) {
+      throw new Damaged("main.index is not a whole number of slots");
+    }
     while (Memory.message(mem, mem.count - 1)?.more) {
       mem.count -= 1;
     }
@@ -218,10 +225,12 @@ export namespace Memory {
     return mem;
   }
 
-  // view.json; null: none, or unreadable
+  // view.json; null: none, or unreadable, its shape too: the logs rebuild it
   export function saved(dir: string): Saved | null {
+    const kept = (view: any) => Array.isArray(view?.parts) && view.parts.every(Array.isArray);
     try {
-      return JSON.parse(fs.readFileSync(dir + "/view.json", "utf8"));
+      const saved = JSON.parse(fs.readFileSync(dir + "/view.json", "utf8"));
+      return kept(saved) && kept(saved.seen ?? saved) ? saved : null;
     } catch {
       return null;
     }
@@ -266,7 +275,11 @@ export namespace Memory {
   // the file's end. A line a crash cut short is skipped
   export function scan(mem: Memory, stream: Stream, day: number, at: number, fd: number): number {
     const file = Memory.path(mem, stream, day);
-    const data = Memory.slice(file, at, fs.statSync(file).size - at);
+    const size = fs.statSync(file).size;
+    if (!(Number.isInteger(at) && at >= 0 && at <= size)) {
+      throw new Damaged(file.slice(mem.dir.length + 1) + " ends before the end view.json saved for it");
+    }
+    const data = Memory.slice(file, at, size - at);
     let k = 0;
     for (let nl = data.indexOf(10); nl >= 0; nl = data.indexOf(10, k)) {
       const rec = Memory.parse(data.subarray(k, nl).toString("utf8"), file);
@@ -310,8 +323,21 @@ export namespace Memory {
     if (day === 0) {
       return null;
     }
-    const line = Memory.pread(Memory.fd(mem, Memory.path(mem, stream, day)), rec.readDoubleLE(0), rec.readUInt32LE(12));
-    return JSON.parse(line.toString("utf8"));
+    const [at, length] = [rec.readDoubleLE(0), rec.readUInt32LE(12)];
+    if (!(Number.isInteger(at) && at >= 0) || Number.isNaN(new Date(day * DAY).getTime())) {
+      throw new Damaged(stream + ".index slot " + slot + " is no place in a file");
+    }
+    const file = Memory.path(mem, stream, day);
+    const name = file.slice(mem.dir.length + 1);
+    if (at + length > fs.fstatSync(Memory.fd(mem, file)).size) {
+      throw new Damaged(stream + ".index slot " + slot + " points past the end of " + name);
+    }
+    const line = Memory.pread(Memory.fd(mem, file), at, length).toString("utf8");
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw new Damaged("the line of " + stream + ".index slot " + slot + " in " + name + " is not JSON");
+    }
   }
 
   // a file of the chat to read, kept open (the FDS read last) while the
@@ -420,9 +446,17 @@ export namespace Memory {
     return who + ": " + root.text + pics.join("");
   }
 
-  // message i, from its file; null: none
+  // message i, from its file; null: none. A message below the count always
+  // has its line, unlike a node not built
   export function message(mem: Memory, i: number): Root | null {
-    return Number.isInteger(i) && i >= 0 && i < mem.count ? Memory.read(mem, "main", i) : null;
+    if (!(Number.isInteger(i) && i >= 0 && i < mem.count)) {
+      return null;
+    }
+    const rec = Memory.read(mem, "main", i);
+    if (rec === null) {
+      throw new Damaged("main.index has no line for message " + i);
+    }
+    return rec;
   }
 
   // the pages logged; those `more` stay open, past the count, till one

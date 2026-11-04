@@ -123,7 +123,9 @@ async function crash_in_print(c: Case): Promise<{ code: number; err: string; out
 }
 
 test("a crash in the chat kills the running job, shows its stack on the given-back terminal, exits 1", async () => {
-  const { code, out, outlived } = await crash_in_terminal(scratch("chat"));
+  const c = scratch("chat");
+  const { code, out, outlived } = await crash_in_terminal(c);
+  expect(fs.readFileSync(c.env.UNII_DIR + "/errors.log", "utf8"), "the stack kept").toContain("Error: the crash");
   expect(outlived, "the job outlived the crash").toBe(false);
   expect(code).toBe(1);
   expect(out).toContain("unii: Error: the crash");

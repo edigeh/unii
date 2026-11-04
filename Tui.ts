@@ -10,8 +10,10 @@
 // tool's process group killed. Ctrl+O opens tool output or folds it.
 // The terminal is given back as it was on any way out: a quit, a signal,
 // an error no one caught. What the user's input runs and fails is a note
-// in a chat that goes on (Tui.attempt); only what escapes that is fatal.
+// in a chat that goes on, its stack in errors.log (Tui.attempt); only what
+// escapes that is fatal.
 
+import * as fs from "node:fs";
 import * as os from "node:os";
 import type { Kind } from "./AskAI.ts";
 import * as config from "./Config.ts";
@@ -22,11 +24,11 @@ import type { Live } from "./Live.ts";
 import { Local, type Chat, type Shown } from "./Local.ts";
 import { Login, type Flow, type Provider } from "./Login.ts";
 import { Machine } from "./Machine.ts";
-import { Memory } from "./Memory.ts";
+import { Damaged, Memory } from "./Memory.ts";
 import { Pick, type Model } from "./Pick.ts";
 import { Price } from "./Price.ts";
 import { Render } from "./Render.ts";
-import { Store, type Session } from "./Store.ts";
+import { ERRORS, Store, type Session } from "./Store.ts";
 
 // Types
 // =====
@@ -192,6 +194,7 @@ export namespace Tui {
     const crash = (err: unknown) => {
       Tui.restore(t);
       process.stderr.write("unii: " + String((err as any)?.stack ?? err) + "\n");
+      Store.log_error(err);
       // after the terminal and the stack: a failure here costs neither
       try {
         Machine.end();
@@ -258,8 +261,14 @@ export namespace Tui {
         Memory.stop(chat.mem);
       }
       Store.unlock(session.dir);
-      // the disk's own errors say what to fix; any other is a bad value read
-      throw new Error("Session " + session.id + " can't be opened: " + (err?.code === undefined ? "its files are damaged." : err.message));
+      const opened = "Session " + session.id + " can't be opened: ";
+      if (err instanceof Damaged) {
+        throw new Error(opened + "its files are damaged: " + err.message, { cause: err });
+      }
+      if (system(err)) {
+        throw new Error(opened + err.message, { cause: err });
+      }
+      throw err;
     }
   }
 
@@ -317,14 +326,18 @@ export namespace Tui {
   }
 
   // what a key runs: what it throws or rejects with, as a bad path or a
-  // failing disk, is a note. Leaving has no chat to note it in: that stays
-  // fatal, as an unhandled rejection (Tui.attach)
+  // failing disk, is a note, and logged; a code bug's note says so. Leaving
+  // has no chat to note it in: that stays fatal, as an unhandled rejection
+  // (Tui.attach)
   export function attempt(t: Tui, run: () => void | Promise<void>): void {
     new Promise<void>((ok) => ok(run())).catch((err) => {
+      const logged = Store.log_error(err);
       if (t.closing) {
         throw err;
       }
-      Tui.note(t, String(err?.message ?? err));
+      const text = String(err?.message ?? err);
+      const actionable = err instanceof Error && err.name === "Error" || system(err);
+      Tui.note(t, actionable ? text : text + " (a bug in unii" + (logged ? "; its stack is in " + home(ERRORS) : "") + ")");
     });
   }
 
@@ -639,7 +652,7 @@ export namespace Tui {
       }
       throw err;
     }
-    Tui.note(t, "Imported " + src + " as a new session: " + s.count + " lines.");
+    Tui.note(t, "Imported " + src + " as a new session: " + t.chat.mem.count + " lines.");
   }
 
   export function goal(t: Tui, arg: string): void {
@@ -920,6 +933,12 @@ function number(n: number): string {
 
 function tokens(n: number): string {
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
+}
+
+// an error of the system (ENOENT, EACCES): it says what to fix. ERR_ codes
+// are Node's own, for a bad value passed: a code bug
+function system(err: any): boolean {
+  return typeof err?.code === "string" && /^E(?!RR_)[A-Z]/.test(err.code);
 }
 
 function home(p: string): string {
