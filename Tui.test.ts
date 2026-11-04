@@ -15,10 +15,10 @@ import * as os from "node:os";
 const DIR = fs.mkdtempSync(os.tmpdir() + "/unii-tui-");
 process.env.UNII_DIR = DIR;
 
-const { Keys } = await import("./Keys.ts");
+const { Keys, WAIT } = await import("./Keys.ts");
 const { Editor } = await import("./Editor.ts");
 const { Render } = await import("./Render.ts");
-const { Tui } = await import("./Tui.ts");
+const { Tui, size } = await import("./Tui.ts");
 const { Store } = await import("./Store.ts");
 const { Local } = await import("./Local.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
@@ -243,5 +243,106 @@ describe("interactive mode", () => {
     Local.interrupt(t.chat, "Stopped by the user.");
     await until(() => !t.chat.busy);
     await Tui.leave(t);
+  });
+
+  test("the model picker shows each model's price and context, and the one marked's facts", async () => {
+    const { out } = screen(100, 40);
+    const t = Tui.make(Store.make(CWD), out, 100, 40, () => {});
+    Tui.send(t, "/model");
+    Tui.show(t);
+    const frame = Tui.frame_lines(t).map(plain);
+    const text = frame.join("\n");
+    // every vendor's model, the current one marked, its facts at the right
+    expect(text).toContain("sonnet-5.5");
+    expect(text).toContain("  claude-api");
+    const marked = frame.find((l) => l.includes("sonnet-5.5 ✓"))!;
+    expect(marked).toContain("1M");
+    expect(marked.endsWith("$2·10")).toBe(true);
+    expect(text).toContain("Ctx");
+    expect(text).toContain("$/M");
+    // the marked one's facts under the list
+    expect(text).toContain("claude-sonnet-5-5 · 1M ctx · $2 in · $10 out · $0.1 cache per M tokens · speeds slow");
+    for (const line of frame) {
+      expect(width(line)).toBeLessThanOrEqual(99);
+    }
+    // typed letters filter; Enter picks the first hit
+    Tui.input(t, "opus");
+    Tui.input(t, "\r");
+    expect(t.chat.pick.model).toBe("opus-5.5");
+    expect(t.chat.pick.vendor).toBe("claude-api");
+    await Tui.leave(t);
+  });
+
+  test("/login lists the providers; one chosen waits for its code, which signs it in", async () => {
+    const { out } = screen(100, 40);
+    const t = Tui.make(Store.make(CWD), out, 100, 40, () => {});
+    Tui.send(t, "/login");
+    Tui.show(t);
+    const menu = Tui.frame_lines(t).map(plain).join("\n");
+    expect(menu).toContain("openai-codex");
+    expect(menu).toContain("opencode-go");
+    expect(menu).toContain("signs codex in with your browser");
+
+    // typing filters the providers; Enter signs in to the one marked
+    Tui.input(t, "chatgpt");
+    Tui.input(t, "\r");
+    expect(t.login?.id).toBe("openai-codex");
+    Tui.show(t);
+    const waiting = Tui.frame_lines(t).map(plain).join("\n");
+    expect(waiting).toContain("Sign in to ChatGPT (Plus/Pro)");
+    expect(waiting).toContain("auth.openai.com/oauth/authorize");
+    expect(waiting).toContain("paste the authorization code");
+
+    const real = globalThis.fetch;
+    const claims = { "https://api.openai.com/profile": { email: "someone@example.com" } };
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      access_token: "x." + Buffer.from(JSON.stringify(claims)).toString("base64url") + ".y", refresh_token: "r", expires_in: 3600,
+    }), { status: 200 })) as typeof fetch;
+    try {
+      Tui.input(t, "the-code\r");
+      await until(() => t.login === null);
+    } finally {
+      globalThis.fetch = real;
+    }
+    expect(t.notes.join(" ")).toContain("Signed in to ChatGPT (Plus/Pro) as someone@example.com");
+    const config = await import("./Config.ts");
+    expect(config.OFFER.vendors).toContain("codex");
+
+    // and its models are offered now
+    Tui.send(t, "/model");
+    Tui.show(t);
+    expect(Tui.frame_lines(t).map(plain).join("\n")).toContain("  codex");
+    await Tui.leave(t);
+  });
+
+  test("Esc closes an open sign-in without sending anything", async () => {
+    const { out } = screen(100, 40);
+    const t = Tui.make(Store.make(CWD), out, 100, 40, () => {});
+    Tui.send(t, "/login opencode-go");
+    expect(t.login?.id).toBe("opencode-go");
+    Tui.input(t, "\x1b");
+    await Bun.sleep(WAIT + 20);
+    expect(t.login).toBe(null);
+    expect(t.notes.join(" ")).toContain("Sign-in cancelled");
+    await Tui.leave(t);
+  });
+
+  test("a terminal reporting no size is drawn 80 by 24, not 0 wide", () => {
+    const kept = ["columns", "rows"].map((k) => [k, Object.getOwnPropertyDescriptor(process.stdout, k)] as const);
+    for (const k of ["columns", "rows"]) {
+      Object.defineProperty(process.stdout, k, { value: 0, configurable: true });
+    }
+    try {
+      expect(size()).toEqual({ w: 80, h: 24 });
+    } finally {
+      for (const [k, own] of kept) {
+        if (own) {
+          Object.defineProperty(process.stdout, k, own);
+        } else {
+          delete (process.stdout as any)[k];
+        }
+      }
+    }
+    expect(size().w).toBeGreaterThan(0);
   });
 });

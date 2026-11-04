@@ -19,7 +19,9 @@ import { Editor } from "./Editor.ts";
 import { Keys, WAIT, type Key } from "./Keys.ts";
 import type { Live } from "./Live.ts";
 import { Local, type Chat, type Shown } from "./Local.ts";
-import { Pick } from "./Pick.ts";
+import { Login, type Flow, type Provider } from "./Login.ts";
+import { Pick, type Model } from "./Pick.ts";
+import { Price } from "./Price.ts";
 import { Render } from "./Render.ts";
 import { Store, type Session } from "./Store.ts";
 
@@ -30,12 +32,17 @@ import { Store, type Session } from "./Store.ts";
 // for a width and fold, kept till either changes
 export type Item = { id: number; kind: Kind; text: string; more: boolean; key: string; lines: string[] };
 
-// a choice in a menu: what it shows, a word after it, its value
-export type Choice = { label: string; info: string; value: string };
+// a choice in a menu: what it shows, a word after it, its value; right:
+// its columns, drawn at the right edge (a model's price and context); now:
+// the one in use; detail: a line under the list, of the one marked;
+// group: the vendor it is listed under, in a picker's panel; columns: its
+// facts, right-aligned; warn: what is wrong with picking it
+export type Choice = { label: string; info: string; value: string; right?: string; now?: boolean; detail?: string; group?: string; columns?: string[]; warn?: string };
 
 // a picker: its title, choices, the one marked, what is typed to filter
-// them; done: the value chosen, null if none
-export type Menu = { title: string; all: Choice[]; at: number; query: string; done: (value: string | null) => void };
+// them; done: the value chosen, null if none; panel: it takes the editor's
+// place (a model selector) instead of listing under it
+export type Menu = { title: string; all: Choice[]; at: number; query: string; done: (value: string | null) => void; panel?: boolean };
 
 // a slash command: its name, its argument's hint, what it does, its run
 export type Cmd = { name: string; arg: string; info: string; run: (t: Tui, arg: string) => void | Promise<void> };
@@ -51,6 +58,7 @@ export type Tui = {
   keys     : Keys;
   render   : Render;
   menu     : Menu | null;
+  login    : { id: Provider; flow: Flow } | null;
   pick     : number;
   open     : boolean;
   notes    : string[];
@@ -97,6 +105,7 @@ const TERM_OFF = "\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?25h\x1b[0m";
 const PLANS = ["codex", "opencode-go"];
 
 export const CMDS: Cmd[] = [
+  { name: "/login",  arg: "[provider]", info: "sign in: ChatGPT/codex, OpenCode Go",            run: (t, a) => Tui.login(t, a) },
   { name: "/model",  arg: "[name]",    info: "pick the model; with a name, that one",            run: (t, a) => Tui.pick_menu(t, "model", a) },
   { name: "/effort", arg: "[level]",   info: "pick the effort; with one, that one",              run: (t, a) => Tui.pick_menu(t, "effort", a) },
   { name: "/resume", arg: "",          info: "go on with another session of this directory",     run: (t) => Tui.sessions(t) },
@@ -116,6 +125,12 @@ const KEYS_HELP = [
   "Up and Down: the lines, then the messages sent before. Ctrl+A/E, Ctrl+U/K/W, Alt+B/F as in a shell. Ctrl+O: tool output. Ctrl+L: redraw.",
 ];
 
+// the terminal's size in columns and rows, the last resort 80 by 24
+// (a pty with no window size told, as under `script`, says 0)
+export function size(): { w: number; h: number } {
+  return { w: process.stdout.columns || 80, h: process.stdout.rows || 24 };
+}
+
 // Tui
 // ===
 
@@ -128,7 +143,7 @@ export namespace Tui {
       const out = (s: string) => {
         process.stdout.write(s);
       };
-      const t = Tui.make(session, out, process.stdout.columns ?? 80, process.stdout.rows ?? 24, done);
+      const t = Tui.make(session, out, size().w, size().h, done);
       Tui.attach(t);
       if (opts.resume) {
         Tui.sessions(t);
@@ -142,7 +157,7 @@ export namespace Tui {
   export function make(session: Session, out: (s: string) => void, w: number, h: number, done: (code: number) => void): Tui {
     const t: Tui = {
       chat: null as unknown as Chat, session, items: [], earlier: 0, live: [], mind: "", ed: Editor.make(), keys: Keys.make(),
-      render: Render.make(out, w, h), menu: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
+      render: Render.make(out, w, h), menu: null, login: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
       frame: 0, started: 0, out, done, closing: false, attached: false, given: false,
     };
     Tui.open(t, session);
@@ -160,7 +175,7 @@ export namespace Tui {
     t.out(TERM_ON);
     stdin.on("data", (chunk: string) => Tui.input(t, chunk));
     process.stdout.on("resize", () => {
-      Render.resize(t.render, process.stdout.columns, process.stdout.rows);
+      Render.resize(t.render, size().w, size().h);
       Tui.draw(t);
     });
     const leave = () => Tui.leave(t);
@@ -280,6 +295,11 @@ export namespace Tui {
     if (t.menu !== null) {
       return Tui.menu_key(t, k);
     }
+    if (t.login !== null && is("escape")) {
+      t.login = null;
+      t.notes = ["Sign-in cancelled."];
+      return Tui.draw(t);
+    }
     if (is("d", "ctrl") && t.ed.text === "") {
       return Tui.leave(t);
     }
@@ -318,7 +338,12 @@ export namespace Tui {
     }
     const did = Editor.key(t.ed, k, Tui.cols(t));
     if (did === "send") {
-      Tui.send(t, Editor.take(t.ed));
+      const text = Editor.take(t.ed);
+      if (t.login === null) {
+        Tui.send(t, text);
+      } else {
+        Tui.login_submit(t, text);
+      }
     }
     t.pick = did === "edit" ? 0 : t.pick;
     Tui.draw(t);
@@ -396,7 +421,87 @@ export namespace Tui {
 
   export function filtered(menu: Menu): Choice[] {
     const q = menu.query.toLowerCase();
-    return menu.all.filter((c) => (c.label + " " + c.info).toLowerCase().includes(q));
+    return menu.all.filter((c) => (c.label + " " + c.info + " " + (c.group ?? "")).toLowerCase().includes(q));
+  }
+
+  // Sign-in
+  // -------
+
+  // /login: the providers to sign in to, those already signed in saying so;
+  // with an argument, the one whose id (or name) it names
+  export function login(t: Tui, arg: string): void {
+    if (t.login !== null) {
+      t.notes = ["A sign-in is already open: paste what it asks for, or Esc."];
+      return Tui.draw(t);
+    }
+    if (arg !== "") {
+      const q = arg.toLowerCase();
+      const hit = Login.PROVIDERS.find((p) => p.id.includes(q)) ?? Login.PROVIDERS.find((p) => p.name.toLowerCase().includes(q));
+      if (hit === undefined) {
+        t.notes = ["No provider " + arg + ": /login lists them."];
+        return Tui.draw(t);
+      }
+      return Tui.sign_in(t, hit.id);
+    }
+    const all = Login.PROVIDERS.map((p): Choice => ({
+      label    : p.id,
+      info     : p.name,
+      right    : Login.signed(p.id) ? "signed in" : "",
+      now      : Login.signed(p.id),
+      detail   : Login.signed(p.id) ? "Signed in as " + Login.who(p.id) + ". Choosing it again signs in anew." : p.hint + ".",
+      value    : p.id,
+    }));
+    t.menu = {
+      title: "Sign in", all, at: Math.max(0, all.findIndex((c) => c.now === true)), query: "",
+      done: (value) => {
+        if (value !== null) {
+          Tui.sign_in(t, value as Provider);
+        }
+        Tui.draw(t);
+      },
+    };
+    Tui.draw(t);
+  }
+
+  // a provider's sign-in started: its page opened where there is one and
+  // its URL in a note; Enter sends what is pasted to it
+  export function sign_in(t: Tui, id: Provider): void {
+    const spec = Login.PROVIDERS.find((p) => p.id === id)!;
+    const flow = Login.begin(id);
+    t.login = { id, flow };
+    const opened = Login.browse(flow.url);
+    t.notes = [
+      "Sign in to " + spec.name + ": " + (opened ? "the browser opened " : "open ") + flow.url,
+      flow.prompt + ", then press Enter. Esc cancels.",
+    ];
+    Tui.draw(t);
+  }
+
+  // what was pasted for the open sign-in, sent to it: a token kept, the
+  // vendor offered from now on (Config.ts), a note saying whose it is
+  export function login_submit(t: Tui, text: string): void {
+    const login = t.login;
+    if (login === null || text.trim() === "") {
+      return;
+    }
+    const spec = Login.PROVIDERS.find((p) => p.id === login.id)!;
+    t.notes = ["Signing in to " + spec.name + "…"];
+    Tui.draw(t);
+    login.flow.submit(text).then(() => {
+      if (t.login !== login) {
+        return;
+      }
+      t.login = null;
+      config.config_offer(Login.vendor(login.id));
+      t.notes = ["Signed in to " + spec.name + " as " + Login.who(login.id) + ". /model lists its models."];
+      Tui.draw(t);
+    }, (err) => {
+      if (t.login !== login) {
+        return;
+      }
+      t.notes = [String((err as any)?.message ?? err), "Paste it again, or Esc to cancel."];
+      Tui.draw(t);
+    });
   }
 
   // Commands
@@ -413,10 +518,25 @@ export namespace Tui {
       }
       return Tui.draw(t);
     }
-    const all = Pick.options(chat.pick, part, config.OFFER).map(([label, p]): Choice => ({ label, info: part === "model" ? p.vendor : "", value: Pick.label(p) }));
+    const all = Pick.options(chat.pick, part, config.OFFER).map(([label, p]): Choice => {
+      if (part === "effort") {
+        return { label, info: "", value: Pick.label(p) };
+      }
+      const model = Pick.model(p.vendor, p.model);
+      return {
+        label,
+        info   : p.vendor,
+        group  : p.vendor,
+        columns: model === undefined ? [] : [context(model), price(model)],
+        now    : Pick.label(p) === Pick.label(chat.pick),
+        detail : model === undefined ? "" : detail(model),
+        warn   : model !== undefined && chat.use.context > model.ctx ? "This chat is over its " + context(model) + " context: picking this model compacts it." : "",
+        value  : Pick.label(p),
+      };
+    });
     const at = Math.max(0, all.findIndex((c) => c.value === Pick.label(chat.pick)));
     t.menu = {
-      title: part === "model" ? "Model" : "Effort", all, at, query: "",
+      title: part === "model" ? "Models" : "Effort", all, at, query: "", panel: true,
       done: (value) => {
         const to = value === null ? null : Pick.read(Tui.parse(value), config.OFFER);
         if (to !== null) {
@@ -578,8 +698,12 @@ export namespace Tui {
       out.push(...wrap([[note, S.yell]], w));
     }
     out.push(paint([["─".repeat(w), S.dim]]));
-    out.push(...Editor.draw(t.ed, w, t.chat.busy ? "message unii as it works" : "message unii, / for commands"));
-    out.push(...Tui.menu_lines(t, w));
+    if (t.menu !== null && t.menu.panel === true) {
+      out.push(...Tui.panel_lines(t, w));
+    } else {
+      out.push(...Editor.draw(t.ed, w, t.login !== null ? (Login.PROVIDERS.find((p) => p.id === t.login!.id)!.kind === "key" ? "paste the key here" : "paste the code here") : t.chat.busy ? "message unii as it works" : "message unii, / for commands"));
+      out.push(...Tui.menu_lines(t, w));
+    }
     out.push(Tui.status(t, w));
     return out;
   }
@@ -591,11 +715,83 @@ export namespace Tui {
       const top = Math.max(0, Math.min(menu.at - Math.floor(MENU_ROWS / 2), list.length - MENU_ROWS));
       const head = paint([[menu.title, S.bold], [menu.query === "" ? "  type to filter · enter picks · esc closes" : "  " + menu.query, S.dim]]);
       const rows = list.slice(top, top + MENU_ROWS).map((c, k) => choice_line(c, top + k === menu.at, w));
-      return [head, ...rows, ...(list.length === 0 ? [paint([["  (none)", S.dim]])] : [])];
+      const out = [head, ...rows, ...(list.length === 0 ? [paint([["  (none)", S.dim]])] : [])];
+      const below = list[menu.at]?.detail;
+      if (below !== undefined && below !== "") {
+        out.push("", ...wrap([[below, S.dim]], w));
+      }
+      return out;
     }
     const cmds = Tui.matches(t);
     const at = Math.min(t.pick, cmds.length - 1);
     return cmds.slice(0, MENU_ROWS).map((c, k) => choice_line({ label: c.name + (c.arg ? " " + c.arg : ""), info: c.info, value: c.name }, k === at, w));
+  }
+
+  // a picker that takes the editor's place, as omp's selector: its title
+  // and how much it offers, the filter typed into it, its choices under
+  // the vendor that runs them with their facts at the right, the marked
+  // one's details under a rule, and the keys
+  export function panel_lines(t: Tui, w: number): string[] {
+    const menu = t.menu!;
+    const list = Tui.filtered(menu);
+    const vendors = new Set(list.map((c) => c.group ?? "").filter((g) => g !== ""));
+    const total = menu.all.length;
+    const label = list.length === total ? total + (total === 1 ? " model" : " models") : list.length + " of " + total + " models";
+    const count = label + (vendors.size > 1 ? " · " + vendors.size + " vendors" : "");
+    const title = cut(menu.title, w);
+    const left = paint([[title, S.bold]]);
+    const tail = cut(count, Math.max(0, w - width(title)));
+    const out = [left + " ".repeat(Math.max(0, w - width(title) - width(tail))) + paint([[tail, S.dim]])];
+    const typed = menu.query === "" ? [["type to filter", S.dim] as Run] : [[cut(menu.query, Math.max(1, w - 8)), S.none] as Run];
+    out.push(paint([["  ⌕ ", S.dim], ...typed, ["▏", S.cyan]]));
+    out.push(paint([["─".repeat(w), S.dim]]));
+    if (list.length === 0) {
+      out.push(paint([["  (none)", S.dim]]));
+    }
+    const top = Math.max(0, Math.min(menu.at - Math.floor(MENU_ROWS / 2), list.length - MENU_ROWS));
+    const shown = list.slice(top, top + MENU_ROWS);
+    const cols = shown.map((c) => c.columns ?? []);
+    const one = Math.max(0, ...cols.map((r) => width(r[0] ?? "")));
+    const two = Math.max(0, ...cols.map((r) => width(r[1] ?? "")));
+    const price = w >= 64 && cols.some((r) => r[1] !== undefined);
+    if (one > 0) {
+      const caps = right_of("Ctx", one) + (price ? "  " + right_of("$/M", two) : "");
+      out.push(paint([[" ".repeat(Math.max(0, w - width(caps))) + caps, S.dim]]));
+    }
+    let group = "";
+    for (const [k, c] of shown.entries()) {
+      const g = c.group ?? "";
+      if (g !== "" && g !== group) {
+        out.push(paint([["  " + g, S.cyan]]));
+        group = g;
+      }
+      const at = top + k === menu.at;
+      const row = (at ? "  ❯ " : "    ") + c.label + (c.now === true ? " ✓" : "");
+      const facts = c.columns ?? [];
+      let right = facts.length === 0 ? "" : right_of(facts[0] ?? "", one);
+      if (right !== "" && price && facts[1] !== undefined) {
+        right += "  " + right_of(facts[1], two);
+      }
+      if (w < 44) {
+        right = "";
+      }
+      const room = Math.max(1, w - (right === "" ? 0 : width(right) + 1));
+      const line = cut(row, room);
+      const gap = " ".repeat(Math.max(0, w - width(line) - width(right)));
+      out.push(paint([[line, at ? S.bold : S.none], [gap, S.none], [right, S.dim]]));
+    }
+    out.push(paint([["─".repeat(w), S.dim]]));
+    const marked = list[menu.at];
+    if (marked !== undefined) {
+      if (marked.detail !== undefined && marked.detail !== "") {
+        out.push(...wrap([[marked.detail, S.dim]], w, [["  ", S.none]], [["  ", S.none]]));
+      }
+      if (marked.warn !== undefined && marked.warn !== "") {
+        out.push(...wrap([[marked.warn, S.yell]], w, [["  ", S.none]], [["  ", S.none]]));
+      }
+    }
+    out.push(paint([["  ↑↓ move · type to filter · enter picks · esc closes", S.dim]]));
+    return out;
   }
 
   // model · effort · context · cost · where · goal
@@ -628,11 +824,45 @@ function mind_lines(text: string, w: number): string[] {
 }
 
 function choice_line(c: Choice, on: boolean, w: number): string {
-  const label = (on ? "› " : "  ") + c.label;
-  const info = c.info === "" ? "" : "  " + c.info;
-  const text = cut(label + info, w);
-  const cut_label = text.slice(0, Math.min(text.length, label.length));
-  return paint([[cut_label, on ? S.cyan : S.none], [text.slice(cut_label.length), S.dim]]);
+  const label = (on ? "› " : "  ") + c.label + (c.now === true ? " ✓" : "");
+  const left  = label + (c.info === "" ? "" : "  " + c.info);
+  const right = c.right !== undefined && width(c.right) + 4 < w ? c.right : "";
+  const room  = Math.max(1, w - (right === "" ? 0 : width(right) + 2));
+  const text  = cut(left, room);
+  const line  = right === "" ? text : text + " ".repeat(Math.max(1, room - width(text))) + right;
+  const head  = text.slice(0, Math.min(label.length, text.length));
+  return paint([[head, on ? S.cyan : S.none], [line.slice(head.length), S.dim]]);
+}
+
+// a model's price pair at list prices (per M tokens, "included" when
+// only a plan runs it), its column at the right of the list
+function price(m: Model): string {
+  const rate = Price.rate(m.id);
+  return rate === undefined ? "included" : "$" + number(rate.input) + "·" + number(rate.output);
+}
+
+// a column's text at the right of a cell n wide
+function right_of(s: string, n: number): string {
+  return " ".repeat(Math.max(0, n - width(s))) + s;
+}
+
+// a model's line under the list: what it is called, its context window and
+// its list prices, and the speeds its vendor runs it at
+function detail(m: Model): string {
+  const rate = Price.rate(m.id);
+  const price = rate === undefined
+    ? "included in the plan"
+    : "$" + number(rate.input) + " in · $" + number(rate.output) + " out" + (rate.read > 0 ? " · $" + number(rate.read) + " cache" : "") + " per M tokens";
+  return [m.id, context(m) + " ctx", price, "speeds " + m.speeds.join(", ")].join(" · ");
+}
+
+function context(m: Model): string {
+  const k = m.ctx / 1000;
+  return k >= 1000 ? number(k / 1000) + "M" : number(k) + "k";
+}
+
+function number(n: number): string {
+  return String(Number(n.toFixed(2)));
 }
 
 function tokens(n: number): string {

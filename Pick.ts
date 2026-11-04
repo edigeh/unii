@@ -1,14 +1,17 @@
 // Pick
 // ====
 // What a chat's calls run on, kept in its log: a vendor (claude-api,
-// openai-api; codex, opencode-go: signed in through omp), a model of its, an effort and a speed; label
-// vendor:model:effort:speed. A chat that saved none takes the config's
-// (`def`). A move steps one part along the picks that differ in it
-// (`options`), wrapping (up and down stop at the ends): next, prev and
-// model every vendor's models, effort, speed (a model lacking one takes
-// its fastest below), up and down the efforts, never the speed; given a
-// value (`to`), to the pick whose part it is. A saved pick the server
-// doesn't offer gives way to def, never to a pick like it.
+// openai-api; codex, opencode-go: signed in with /login, Login.ts, or
+// through omp), a model of its, an effort and a speed; label
+// vendor:model:effort:speed. A chat that saved none takes
+// the config's (`def`). A move steps one part along the picks that differ
+// in it (`options`), wrapping (up and down stop at the ends): next, prev
+// and model every vendor's models, effort, speed (a model lacking one
+// takes its fastest below), up and down the efforts, never the speed;
+// given a value (`to`), to the pick whose part it is. A saved pick the
+// server doesn't offer gives way to def, never to a pick like it. A model
+// also knows its context window, which the model picker (Tui.ts) shows
+// beside its price.
 
 import type { Vendor } from "./AskAI.ts";
 
@@ -26,9 +29,10 @@ export type Pick = {
 // a key's change to the pick
 export type Move = "next" | "prev" | "model" | "up" | "down" | "effort" | "speed";
 
-// a model: as shown, as the vendor names it, its speeds; api: the one
-// its vendor serves it on, if the vendor has more (opencode-go)
-export type Model = { label: string; id: string; speeds: string[]; api?: "responses" | "messages" };
+// a model: as shown, as the vendor names it, its speeds, its context
+// window in tokens; api: the one its vendor serves it on, if the vendor
+// has more (opencode-go)
+export type Model = { label: string; id: string; speeds: string[]; ctx: number; api?: "responses" | "messages" };
 
 // what a server offers: vendors, and models by label
 export type Offer = { vendors: Vendor[]; models: string[] };
@@ -38,23 +42,23 @@ export type Offer = { vendors: Vendor[]; models: string[] };
 
 export const VENDORS: Vendor[] = ["claude-api", "openai-api", "codex", "opencode-go"];
 
-const OPUS  : Model = { label: "opus-5.5",   id: "claude-opus-5-5",   speeds: ["slow", "fast"] };
-const SONNET: Model = { label: "sonnet-5.5", id: "claude-sonnet-5-5", speeds: ["slow"] };
-const HAIKU : Model = { label: "haiku-5.5",  id: "claude-haiku-5-5",  speeds: ["slow"] };
+const OPUS  : Model = { label: "opus-5.5",   id: "claude-opus-5-5",   speeds: ["slow", "fast"], ctx: 1e6 };
+const SONNET: Model = { label: "sonnet-5.5", id: "claude-sonnet-5-5", speeds: ["slow"],          ctx: 1e6 };
+const HAIKU : Model = { label: "haiku-5.5",  id: "claude-haiku-5-5",  speeds: ["slow"],          ctx: 200e3 };
 const OPENAI: Model[] = [
-  { label: "gpt-6-luna",  id: "gpt-6-luna",  speeds: ["slow", "fast"] },
-  { label: "gpt-6.1-sol", id: "gpt-6.1-sol", speeds: ["slow", "fast"] },
-  { label: "gpt-6-astra", id: "gpt-6-astra", speeds: ["slow", "fast", "ultrafast"] },
+  { label: "gpt-6-luna",  id: "gpt-6-luna",  speeds: ["slow", "fast"],           ctx: 400e3 },
+  { label: "gpt-6.1-sol", id: "gpt-6.1-sol", speeds: ["slow", "fast"],           ctx: 400e3 },
+  { label: "gpt-6-astra", id: "gpt-6-astra", speeds: ["slow", "fast", "ultrafast"], ctx: 1e6 },
 ];
 
 // OpenCode Go's, those it serves on an API Unii speaks
 const GO: Model[] = [
-  { label: "go-gpt-6-luna",        id: "gpt-6-luna",        speeds: ["slow"], api: "responses" },
-  { label: "go-grok-4.7",          id: "grok-4.7",          speeds: ["slow"], api: "responses" },
-  { label: "go-deepseek-v4-flash", id: "deepseek-v4-flash", speeds: ["slow"], api: "responses" },
-  { label: "go-haiku-5.5",         id: "claude-haiku-5-5",  speeds: ["slow"], api: "messages" },
-  { label: "go-qwen3.8-max",       id: "qwen3.8-max",       speeds: ["slow"], api: "messages" },
-  { label: "go-minimax-m2.5",      id: "minimax-m2.5",      speeds: ["slow"], api: "messages" },
+  { label: "go-gpt-6-luna",        id: "gpt-6-luna",        speeds: ["slow"], ctx: 400e3, api: "responses" },
+  { label: "go-grok-4.7",          id: "grok-4.7",          speeds: ["slow"], ctx: 256e3, api: "responses" },
+  { label: "go-deepseek-v4-flash", id: "deepseek-v4-flash", speeds: ["slow"], ctx: 200e3, api: "responses" },
+  { label: "go-haiku-5.5",         id: "claude-haiku-5-5",  speeds: ["slow"], ctx: 200e3, api: "messages" },
+  { label: "go-qwen3.8-max",       id: "qwen3.8-max",       speeds: ["slow"], ctx: 256e3, api: "messages" },
+  { label: "go-minimax-m2.5",      id: "minimax-m2.5",      speeds: ["slow"], ctx: 200e3, api: "messages" },
 ];
 
 // each vendor's models, at the speeds it runs them
@@ -78,6 +82,11 @@ export namespace Pick {
 
   export function model(vendor: Vendor, label: string): Model | undefined {
     return MODELS[vendor].find((m) => m.label === label);
+  }
+
+  // a vendor's models' labels, as it offers them
+  export function labels(vendor: Vendor): string[] {
+    return MODELS[vendor].map((m) => m.label);
   }
 
   // the API a model (by its id) is served on
