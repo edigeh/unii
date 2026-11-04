@@ -173,8 +173,10 @@ export namespace Local {
     return true;
   }
 
-  // the user's message, logged and taken
+  // the user's message, logged and taken. The save first: logged, it can't
+  // be taken back, and a turn's first write is this save
   export function say(chat: Chat, text: string): Msg {
+    Memory.save(chat.mem);
     const msg = Local.push(chat, "user", text);
     Local.take(chat, msg);
     return msg;
@@ -372,15 +374,30 @@ export namespace Local {
     chat.hooks.state();
   }
 
+  // unsaved, as it was: mem.pick may be null with chat.pick the default
   export function repick(chat: Chat, pick: Pick): void {
+    const [was, kept] = [chat.pick, chat.mem.pick];
     chat.pick = chat.mem.pick = pick;
-    Memory.save(chat.mem);
+    try {
+      Memory.save(chat.mem);
+    } catch (err) {
+      chat.pick = was;
+      chat.mem.pick = kept;
+      throw err;
+    }
     chat.hooks.state();
   }
 
+  // unsaved, as it was
   export function goal(chat: Chat, goal: string | null): void {
+    const was = chat.mem.goal;
     chat.mem.goal = goal;
-    Memory.save(chat.mem);
+    try {
+      Memory.save(chat.mem);
+    } catch (err) {
+      chat.mem.goal = was;
+      throw err;
+    }
     if (goal === null) {
       Local.push(chat, "note", "Goal halted by the user.");
     }

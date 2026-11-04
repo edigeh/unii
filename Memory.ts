@@ -420,17 +420,18 @@ export namespace Memory {
   export function log(mem: Memory, stream: Stream, recs: object[]): void {
     const day = Date.parse(new Date().toLocaleDateString("sv-SE")) / DAY;
     const lines = recs.map((rec) => JSON.stringify(rec));
-    let at = Memory.append(Memory.path(mem, stream, day), lines);
+    // the index open first: refused, nothing is logged that it won't count
     const fd = fs.openSync(mem.dir + "/" + stream + ".index", "r+");
     try {
+      let at = Memory.append(Memory.path(mem, stream, day), lines);
       for (const [k, line] of lines.entries()) {
         Memory.place(mem, fd, stream, recs[k], day, at, Memory.bytes(line));
         at += Memory.bytes(line) + 1;
       }
+      mem.ends[stream] = [day, at];
     } finally {
       fs.closeSync(fd);
     }
-    mem.ends[stream] = [day, at];
   }
 
   // where they start; flushed soon (Disk.ts)
