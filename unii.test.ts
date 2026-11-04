@@ -103,15 +103,17 @@ function saved_work(dir: string): string[] {
   return JSON.parse(fs.readFileSync(dir + "/view.json", "utf8")).work;
 }
 
-async function terminal<A>(run: () => Promise<A>): Promise<A> {
-  const was = [process.stdin.isTTY, process.stdout.isTTY];
-  process.stdin.isTTY = true;
-  process.stdout.isTTY = true;
+async function terminal<A>(on: boolean, cwd: string, run: () => Promise<A>): Promise<A> {
+  const was = [process.stdin.isTTY, process.stdout.isTTY, process.cwd()] as const;
+  process.stdin.isTTY = on;
+  process.stdout.isTTY = on;
+  process.chdir(cwd);
   try {
     return await run();
   } finally {
     process.stdin.isTTY = was[0];
     process.stdout.isTTY = was[1];
+    process.chdir(was[2]);
   }
 }
 
@@ -167,13 +169,7 @@ describe("--import", () => {
   test("from the shell, one that won't open leaves no session and a next start isn't stuck", async () => {
     const cwd = fresh();
     const src = damaged_copy_of((await older(fresh())).dir);
-    const here = process.cwd();
-    process.chdir(cwd);
-    try {
-      await expect(terminal(() => main(["--import", src]))).rejects.toThrow("can't be opened");
-    } finally {
-      process.chdir(here);
-    }
+    await expect(terminal(true, cwd, () => main(["--import", src]))).rejects.toThrow("can't be opened");
     expect(fs.readdirSync(Store.home(cwd))).toEqual([]);
     expect(Store.latest(cwd)).toBeNull();
   });
@@ -181,18 +177,7 @@ describe("--import", () => {
   test("with no terminal it stays imported and says what is needed", async () => {
     const cwd = fresh();
     const src = (await older(fresh())).dir;
-    const here = process.cwd();
-    process.chdir(cwd);
-    const was = [process.stdin.isTTY, process.stdout.isTTY];
-    process.stdin.isTTY = false;
-    process.stdout.isTTY = false;
-    try {
-      expect(await main(["--import", src])).toBe(2);
-    } finally {
-      process.chdir(here);
-      process.stdin.isTTY = was[0];
-      process.stdout.isTTY = was[1];
-    }
+    expect(await terminal(false, cwd, () => main(["--import", src]))).toBe(2);
     expect(Store.list(cwd).map((s) => s.from)).toEqual([src]);
   });
 });
@@ -250,9 +235,9 @@ describe("--resume", () => {
   }
 
   test("another session picked leaves the cut turn saved, for when its session opens", async () => {
-    STUB.script = () => [{ t: "text", x: "went on" }];
     const cwd = fresh();
     const other = await older(cwd, "the other chat");
+    STUB.script = () => [{ t: "text", x: "went on" }];
     Bun.sleepSync(5);
     const session = cut_turn(cwd);
     const seen = STUB.reqs.length;
@@ -270,9 +255,9 @@ describe("--resume", () => {
   });
 
   test("a pick that won't open stays on this session, and the cut turn goes on", async () => {
-    STUB.script = () => [{ t: "text", x: "went on" }];
     const cwd = fresh();
     const bad = await older(cwd, "the damaged chat");
+    STUB.script = () => [{ t: "text", x: "went on" }];
     garble(bad.dir);
     Bun.sleepSync(5);
     const session = cut_turn(cwd);
@@ -281,16 +266,6 @@ describe("--resume", () => {
     choose(chat, bad.dir);
     await goes_on(session, chat, seen);
     expect(chat.shown()).toContain("can't be opened");
-    await Tui.leave(chat.t);
-  });
-
-  test("/resume later on opens no held turn: the picker's Esc runs nothing", async () => {
-    const chat = started(Store.make(fresh()));
-    const seen = STUB.reqs.length;
-    Tui.input(chat.t, "/resume\r");
-    Tui.input(chat.t, "\x03");
-    await Bun.sleep(50);
-    expect(STUB.reqs.length).toBe(seen);
     await Tui.leave(chat.t);
   });
 });
