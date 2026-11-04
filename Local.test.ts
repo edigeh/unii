@@ -5,10 +5,11 @@
 // Machine: a turn answers and is logged; tools run in the working dir; a
 // message sent mid-turn reaches the model between tool calls, in the same
 // turn; a stop ends a reply and a running command at once, its process
-// group gone; a turn cut by a crash goes on as the chat opens again;
-// summaries build in the background; a session that fails to open leaves
-// no file open; what fails in a turn or a summary is logged with its stack
-// in errors.log, a code bug's note says so, and the chat goes on.
+// group gone; a turn cut by a crash goes on as the chat opens again; a
+// pick or goal that can't be saved stays as it was; summaries build in the
+// background; a session that fails to open leaves no file open; what fails
+// in a turn or a summary is logged with its stack in errors.log, a code
+// bug's note says so, and the chat goes on.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -162,6 +163,36 @@ test("a turn a crash cut goes on as the chat opens again", async () => {
   expect(h.log.at(-1)).toBe("unii: resumed");
   expect(STUB.reqs.at(-1)!.last).toContain("restarted");
   expect(chat.mem.work).toEqual([]);
+  await Local.close(chat);
+});
+
+test("a repick that can't be saved leaves the pick and view.json as they were", async () => {
+  const dir = DIR + "/s-repick";
+  const chat = Local.open(dir, CWD, hooks());
+  const was = chat.pick;
+  fs.chmodSync(dir, 0o555);
+  expect(() => Local.repick(chat, { ...was, effort: "max" })).toThrow("EACCES");
+  fs.chmodSync(dir, 0o755);
+  expect(chat.pick).toEqual(was);
+  expect(chat.mem.pick).toBe(null);
+  Memory.save(chat.mem);
+  expect(Memory.saved(dir)!.pick).toBe(null);
+  await Local.close(chat);
+});
+
+test("a goal that can't be saved leaves the goal and view.json as they were", async () => {
+  const dir = DIR + "/s-goal";
+  const h = hooks();
+  const chat = Local.open(dir, CWD, h);
+  Local.goal(chat, "the first");
+  fs.chmodSync(dir, 0o555);
+  expect(() => Local.goal(chat, "the second")).toThrow("EACCES");
+  expect(() => Local.goal(chat, null)).toThrow("EACCES");
+  fs.chmodSync(dir, 0o755);
+  expect(chat.mem.goal).toBe("the first");
+  expect(h.log).toEqual([]);
+  Memory.save(chat.mem);
+  expect(Memory.saved(dir)!.goal).toBe("the first");
   await Local.close(chat);
 });
 
