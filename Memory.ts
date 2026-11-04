@@ -204,25 +204,32 @@ export namespace Memory {
       view: { parts: [], size: 0, batch: false, high: HIGH }, seen: { parts: [], size: 0, batch: false, high: SEEN },
       busy: new Map(), sides: new Map(), calls: new Map(), hold: [null, "paused"], done: false, wait: new Set(), share, acted,
     };
-    const saved = Memory.saved(dir);
-    mem.pick = saved?.pick ?? null;
-    mem.goal = saved?.goal ?? null;
-    mem.work = saved?.work ?? [];
-    mem.ends.main = Memory.index(mem, "main", saved?.main ?? [0, 0]);
-    mem.ends.tree = Memory.index(mem, "tree", saved?.tree ?? [0, 0]);
-    mem.count = fs.statSync(dir + "/main.index").size / SLOT;
-    if (!Number.isInteger(mem.count)) {
-      throw new Damaged("main.index is not a whole number of slots");
+    try {
+      const saved = Memory.saved(dir);
+      mem.pick = saved?.pick ?? null;
+      mem.goal = saved?.goal ?? null;
+      mem.work = saved?.work ?? [];
+      mem.ends.main = Memory.index(mem, "main", saved?.main ?? [0, 0]);
+      mem.ends.tree = Memory.index(mem, "tree", saved?.tree ?? [0, 0]);
+      mem.count = fs.statSync(dir + "/main.index").size / SLOT;
+      if (!Number.isInteger(mem.count)) {
+        throw new Damaged("main.index is not a whole number of slots");
+      }
+      while (Memory.message(mem, mem.count - 1)?.more) {
+        mem.count -= 1;
+      }
+      Memory.open(mem, mem.view, saved);
+      Memory.open(mem, mem.seen, saved?.seen ?? saved);
+      Memory.roots(mem.count).flatMap((part) => Memory.todo(mem, part)).forEach((part) => Memory.ready(mem, part, true));
+      Memory.fit(mem);
+      Memory.save(mem);
+      return mem;
+    } catch (err) {
+      // no caller gets this mem to stop; no summary starts in a load, so
+      // all this does is close the files it read
+      Memory.stop(mem);
+      throw err;
     }
-    while (Memory.message(mem, mem.count - 1)?.more) {
-      mem.count -= 1;
-    }
-    Memory.open(mem, mem.view, saved);
-    Memory.open(mem, mem.seen, saved?.seen ?? saved);
-    Memory.roots(mem.count).flatMap((part) => Memory.todo(mem, part)).forEach((part) => Memory.ready(mem, part, true));
-    Memory.fit(mem);
-    Memory.save(mem);
-    return mem;
   }
 
   // view.json; null: none, or unreadable, its shape too: the logs rebuild it
