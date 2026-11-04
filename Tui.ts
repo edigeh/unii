@@ -86,6 +86,10 @@ type Timer = ReturnType<typeof setTimeout>;
 // a new one, if another unii held the one asked for
 type Opened = { session: Session; chat: Chat; shown: Shown[]; notes: string[] };
 
+// how the terminal starts on a session: chosen: unii chose it, not the user;
+// resume: the sessions picker comes first
+type Start = { chosen?: boolean; resume?: boolean };
+
 // Constants
 // =========
 
@@ -146,30 +150,50 @@ export function size(): { w: number; h: number } {
 export namespace Tui {
 
   // the chat of `session` in the terminal till it quits; resume: the
-  // sessions picker shown first. The exit code it quits with
-  export function run(session: Session, opts: { resume?: boolean } = {}): Promise<number> {
+  // sessions picker shown first; chosen: as in Tui.make. The exit code it
+  // quits with
+  export function run(session: Session, opts: Start = {}): Promise<number> {
     return new Promise((done) => {
       const out = (s: string) => {
         process.stdout.write(s);
       };
-      const t = Tui.make(session, out, size().w, size().h, done);
+      const t = Tui.make(session, out, size().w, size().h, done, opts);
       Tui.attach(t);
       if (opts.resume) {
-        Tui.sessions(t);
+        Tui.sessions(t, true);
       }
       Tui.draw(t);
     });
   }
 
   // the harness's state on a session, drawn to `out` at w by h (a test's
-  // screen, or the terminal)
-  export function make(session: Session, out: (s: string) => void, w: number, h: number, done: (code: number) => void): Tui {
+  // screen, or the terminal). chosen: a session that won't open gives way to
+  // a new one, its files kept, as the user didn't ask for it. resume: a turn a
+  // crash cut waits for the picker (Tui.sessions)
+  export function make(session: Session, out: (s: string) => void, w: number, h: number, done: (code: number) => void, opts: Start = {}): Tui {
     const t: Tui = {
       chat: null as unknown as Chat, session, items: [], earlier: 0, live: [], mind: "", ed: Editor.make(), keys: Keys.make(),
       render: Render.make(out, w, h), menu: null, login: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
       frame: 0, started: 0, out, done, closing: false, attached: false, given: false,
     };
-    Tui.enter(t, Tui.open(t, session));
+    let opened: Opened;
+    try {
+      opened = Tui.open(t, session);
+    } catch (err: any) {
+      if (!opts.chosen) {
+        throw err;
+      }
+      Store.log_error(err);
+      const fresh = Store.make(session.cwd);
+      try {
+        opened = Tui.open(t, fresh);
+      } catch (failed) {
+        Store.drop(fresh.dir);
+        throw failed;
+      }
+      opened.notes.push(String(err?.message ?? err), "This is a new session; /resume lists the others.");
+    }
+    Tui.enter(t, opened, opts.resume);
     return t;
   }
 
@@ -272,8 +296,8 @@ export namespace Tui {
     }
   }
 
-  // a chat opened, on screen; a turn a crash cut goes on
-  export function enter(t: Tui, { session, chat, shown, notes }: Opened): void {
+  // a chat opened, on screen; a turn a crash cut goes on, unless held
+  export function enter(t: Tui, { session, chat, shown, notes }: Opened, hold = false): void {
     t.session = session;
     t.chat = chat;
     t.items = [];
@@ -287,7 +311,9 @@ export namespace Tui {
     if (t.chat.mem.count === 0 && session.from === undefined && Store.chats().length > 0 && Store.list(session.cwd).every((s) => s.count === 0)) {
       t.notes.push("The server's chat can come here with its history and memory: /import.");
     }
-    Local.resume(t.chat);
+    if (!hold) {
+      Local.resume(t.chat);
+    }
     Render.redraw(t.render);
   }
 
@@ -607,7 +633,16 @@ export namespace Tui {
     return { vendor: vendor as Pick["vendor"], model, effort, speed };
   }
 
-  export function sessions(t: Tui): void {
+  // held: this chat's cut turn was held for this picker (Tui.enter). It goes
+  // on unless the picker leaves this chat; another session's opening leaves
+  // it saved for when this one opens again
+  export function sessions(t: Tui, held = false): void {
+    const chat = t.chat;
+    const go_on = () => {
+      if (held && !chat.closed) {
+        Local.resume(chat);
+      }
+    };
     const list = Store.list(t.session.cwd).filter((s) => !s.print);
     const all = list.map((s): Choice => ({
       label: (s.last === null ? "(empty)" : cut(clean(s.last.text).replace(/\s+/g, " "), 60)),
@@ -619,8 +654,12 @@ export namespace Tui {
       done: (dir) => {
         const s = dir === null ? null : Store.read(dir);
         if (s !== null && s.id !== t.session.id) {
-          return Tui.switch_to(t, s);
+          return Tui.switch_to(t, s).catch((err) => {
+            go_on();
+            throw err;
+          });
         }
+        go_on();
         Tui.draw(t);
       },
     };

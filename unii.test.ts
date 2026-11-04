@@ -137,6 +137,22 @@ describe("a session chosen for the user", () => {
     expect(files(bad.dir)).toEqual(before);
   });
 
+  test("if the new session won't open either, it isn't left behind", async () => {
+    const cwd = fresh();
+    const bad = await older(cwd);
+    garble(bad.dir);
+    const open = Tui.open;
+    (Tui as any).open = () => {
+      throw new Error("nothing opens");
+    };
+    try {
+      expect(() => started(Store.latest(cwd)!, { chosen: true })).toThrow("nothing opens");
+    } finally {
+      (Tui as any).open = open;
+    }
+    expect(Store.list(cwd).map((s: Session) => s.id)).toEqual([bad.id]);
+  });
+
   test("three starts on one that won't open make one new session, chosen after", async () => {
     const cwd = fresh();
     const bad = await older(cwd);
