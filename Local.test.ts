@@ -16,7 +16,7 @@ import * as os from "node:os";
 import { DIR } from "./scratch.stub.ts";
 
 const { Local, TURN } = await import("./Local.ts");
-const { Damaged, Memory } = await import("./Memory.ts");
+const { AGAIN, Damaged, Memory } = await import("./Memory.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 
 type Hooks = import("./Local.ts").Hooks;
@@ -294,14 +294,36 @@ test("a summary's code bug is in errors.log with its stack, and a later try stil
   const chat = Local.open(DIR + "/s13", CWD, hooks());
   plant(Memory, "ask", new TypeError("planted in a summary"));
   Memory.push(chat.mem, Array.from({ length: 4 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(2000) })));
-  const until = Date.now() + 5000;
+  const until = Date.now() + AGAIN + 5000;
   while (Memory.first(chat.mem) < 4 && Date.now() < until) {
     await Bun.sleep(10);
   }
   expect(logged()).toContain("TypeError: planted in a summary\n");
   expect(Memory.first(chat.mem)).toBe(4);
   await Local.close(chat);
-});
+}, AGAIN + 10000);
+
+test("a summary that keeps failing tells its reason once, lets the terminal run, and builds once it can", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-summary-cwd-"));
+  fs.mkdirSync(cwd + "/AGENTS.md");
+  const told = () => logged().split("EISDIR").length - 1;
+  const before = told();
+  const chat = Local.open(DIR + "/s16", cwd, hooks());
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  Memory.push(chat.mem, Array.from({ length: 4 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(200) })));
+  await Bun.sleep(500);
+  clearInterval(timer);
+  expect(ticks, "the event loop runs while it fails").toBeGreaterThan(10);
+  expect(told() - before, "told once").toBe(1);
+  fs.rmdirSync(cwd + "/AGENTS.md");
+  const until = Date.now() + AGAIN + 5000;
+  while (Memory.first(chat.mem) < 4 && Date.now() < until) {
+    await Bun.sleep(10);
+  }
+  expect(Memory.first(chat.mem)).toBe(4);
+  await Local.close(chat);
+}, AGAIN + 10000);
 
 test("summaries a stop cuts are no errors", async () => {
   const chat = Local.open(DIR + "/s14", CWD, hooks());
