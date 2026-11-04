@@ -12,6 +12,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as config from "./Config.ts";
+import { Memory } from "./Memory.ts";
 
 // Types
 // =====
@@ -36,6 +37,9 @@ export type Session = {
 // =========
 
 export const ROOT = config.DIR + "/sessions";
+
+// the errors Store.log_error keeps; its dir holds auth.json, so the owner's alone
+export const ERRORS = config.DIR + "/errors.log";
 
 // a chat's files an import copies (up/, posts' bodies, never: they are
 // unlinked once open)
@@ -140,6 +144,18 @@ export namespace Store {
     return Store.list(cwd).find((s) => !s.print && Store.holder(s.dir) === null) ?? null;
   }
 
+  // an error's time and stack, and its cause's, appended to ERRORS; false:
+  // it can't be written, and the caller still has the error to report
+  export function log_error(err: any): boolean {
+    const stacks = [err, ...(err?.cause === undefined ? [] : [err.cause])].map((e) => String(e?.stack ?? e));
+    try {
+      fs.appendFileSync(ERRORS, new Date().toISOString() + "\n" + stacks.join("\n") + "\n\n", { mode: 0o600 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // Locks
   // -----
 
@@ -209,9 +225,16 @@ export namespace Store {
   }
 
   // what is wrong with a chat's logs at `dir`, read as Memory.ts reads them:
-  // an index is whole slots, each at a line of its day's file; null: nothing
+  // view.json is a file; a saved end is within its day's file; an index a
+  // load keeps (Memory.index makes anew one with no saved end) is whole
+  // slots, each within its day's file. Its lines aren't parsed: one that is
+  // no JSON is Damaged when read. null: nothing
   export function flaw(dir: string): string | null {
-    for (const log of ["main", "tree"]) {
+    if (fs.existsSync(dir + "/view.json") && !fs.statSync(dir + "/view.json").isFile()) {
+      return "view.json is not a file";
+    }
+    const saved = Memory.saved(dir);
+    for (const log of ["main", "tree"] as const) {
       const file = dir + "/" + log + ".index";
       if (!fs.existsSync(file)) {
         continue;
@@ -221,6 +244,14 @@ export namespace Store {
       }
       if (fs.existsSync(dir + "/" + log) && !fs.statSync(dir + "/" + log).isDirectory()) {
         return log + " is not a directory";
+      }
+      const end = saved?.[log] ?? [0, 0];
+      if (end[0] === 0) {
+        continue;
+      }
+      const ends = Store.day_size(dir + "/" + log, end[0]);
+      if (ends !== -1 && !(end[1] >= 0 && end[1] <= ends)) {
+        return log + " ends before the end view.json saved for it";
       }
       const index = fs.readFileSync(file);
       if (index.length % SLOT !== 0) {
