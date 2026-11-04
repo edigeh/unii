@@ -1,21 +1,24 @@
 // Plans
 // =====
-// The wires of the vendors a subscription pays for, signed in through omp
-// (Omp.ts): codex, a ChatGPT plan's Responses API (its Codex backend), and
-// opencode-go, OpenCode Go's Responses and Messages APIs. Each speaks as
-// openai-api or claude-api does (OpenAI.ts, Anthropic.ts), less what its
-// backend refuses. Codex takes the system prompt as `instructions`, caches
-// by a prompt_cache_key, not breakpoints, sets no output cap and no
-// tool-call limit, and names the fast tier "priority"; its response's end
-// may list no output, so the items are kept as each one is done. OpenCode
-// Go routes by a stable session id (x-opencode-session) and a client's
-// own user agent. A chat's session id is its system prompt and the start of its
-// view, which stay the same from call to call (Memory.ts).
+// The wires of the vendors a subscription pays for: codex, a ChatGPT
+// plan's Responses API (its Codex backend), and opencode-go, OpenCode Go's
+// Responses and Messages APIs. Each is signed in at unii first (Login.ts:
+// openai-codex by OAuth, opencode-go by its key) and, where unii has no
+// sign-in of its own, through omp (Omp.ts). Each speaks as openai-api or
+// claude-api does (OpenAI.ts, Anthropic.ts), less what its backend refuses.
+// Codex takes the system prompt as `instructions`, caches by a
+// prompt_cache_key, not breakpoints, sets no output cap and no tool-call
+// limit, and names the fast tier "priority"; its response's end may list no
+// output, so the items are kept as each one is done. OpenCode Go routes by
+// a stable session id (x-opencode-session) and a client's own user agent. A
+// chat's session id is its system prompt and the start of its view, which
+// stay the same from call to call (Memory.ts).
 
 import { createHash } from "node:crypto";
 import type { Ask } from "./AskAI.ts";
 import type { Emit, Wire } from "./Agent.ts";
 import { Anthropic } from "./Anthropic.ts";
+import { Login } from "./Login.ts";
 import { OpenAI } from "./OpenAI.ts";
 import { Omp } from "./Omp.ts";
 
@@ -77,7 +80,7 @@ export namespace Plans {
     ...OpenAI.wire,
     read    : Plans.codex_read,
     key     : "codex",
-    auth    : () => Omp.codex(),
+    auth    : async () => (await Login.token()) ?? Omp.codex(),
     url     : "https://chatgpt.com/backend-api/codex/responses",
     headers : (key, ask) => ({
       authorization        : "Bearer " + key,
@@ -96,7 +99,7 @@ export namespace Plans {
   export const go_responses: Wire<any> = {
     ...OpenAI.wire,
     key     : "opencode-go",
-    auth    : async () => Omp.key("opencode-go"),
+    auth    : async () => Login.key("opencode-go") ?? Omp.key("opencode-go"),
     url     : GO + "/responses",
     headers : (key, ask) => ({ ...OpenAI.wire.headers(key, ask), ...go(key, ask) }),
   };
@@ -104,7 +107,7 @@ export namespace Plans {
   export const go_messages: Wire<any> = {
     ...Anthropic.wire,
     key     : "opencode-go",
-    auth    : async () => Omp.key("opencode-go"),
+    auth    : async () => Login.key("opencode-go") ?? Omp.key("opencode-go"),
     url     : GO + "/messages",
     headers : (key, ask) => ({ ...Anthropic.wire.headers(key, ask), ...go(key, ask) }),
     count   : async () => null,

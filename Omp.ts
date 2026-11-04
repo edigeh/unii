@@ -1,15 +1,16 @@
 // Omp
 // ===
-// The sign-ins of oh-my-pi (omp), read from its database (config `omp`,
-// default ~/.omp/agent/agent.db), so a server runs on the plans its owner
-// already signed in to there: a ChatGPT plan (codex) by OAuth, OpenCode Go
-// by its key. Each call reads the newest enabled credential of its
-// provider; of ChatGPT accounts, the one whose plan is best (PLANS), or
-// config `codex`: the email of the one to use.
+// omp's sign-ins, read from its database (config `omp`, default
+// ~/.omp/agent/agent.db), for a vendor unii has no sign-in of its own for
+// (Login.ts: /login takes them at unii first): a ChatGPT plan (codex) by
+// OAuth, OpenCode Go by its key. Each call reads the newest enabled
+// credential of its provider; of ChatGPT accounts, the one whose plan is
+// best (PLANS), or config `codex`: the email of the one to use.
 // An OAuth token near its end is refreshed here, once at a time, and
 // written back to its row only if omp didn't refresh it meanwhile (a
 // refresh token works once: whoever loses the race reads the winner's),
-// so omp and this server share one sign-in.
+// so omp and this server share one sign-in. `account` reads a token's
+// claims (a token unii signed in with too).
 
 import { Database } from "bun:sqlite";
 import * as config from "./Config.ts";

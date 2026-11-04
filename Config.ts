@@ -69,6 +69,19 @@ export function config_path(path: string): string {
   return path.startsWith("~/") ? os.homedir() + path.slice(1) : path;
 }
 
+// what a sign-in adds to what is offered (Login.ts): its vendor, and the
+// models of its the config left out
+export function config_offer(vendor: Vendor): void {
+  if (!OFFER.vendors.includes(vendor)) {
+    OFFER.vendors.push(vendor);
+  }
+  for (const label of Pick.labels(vendor)) {
+    if (!OFFER.models.includes(label)) {
+      OFFER.models.push(label);
+    }
+  }
+}
+
 function config_run(key: string, text: string): Pick {
   const [vendor, model, effort, speed] = text.split(":");
   const pick = Pick.read({ vendor, model, effort, speed }, OFFER);
