@@ -26,6 +26,9 @@ const timer = setInterval(() => {
     return;
   }
   clearInterval(timer);
+  if (process.env.NO_CRASH) {
+    return;
+  }
   if (process.env.PS_FAILS) {
     Bun.spawnSync = () => {
       throw new Error("ps failed");
@@ -162,4 +165,20 @@ test("a print-mode crash whose process listing fails still shows the error and e
   expect(code).toBe(1);
   expect(err).toContain("the crash");
   expect(outlived, "the job's group killed before the listing failed").toBe(false);
+}, 30000);
+
+test("print mode whose terminal closes kills the running job and exits 1", async () => {
+  const c = scratch("print-hup", { NO_CRASH: "1" });
+  const proc = Bun.spawn([process.execPath, "--preload=" + PRELOAD, ROOT + "/unii.ts", "-p", "go"], {
+    cwd: c.cwd,
+    env: c.env,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await until(() => fs.existsSync(c.pid_file), "the job's pid");
+  proc.kill("SIGHUP");
+  const code = await proc.exited;
+  expect(await job_outlived(c.pid_file), "the job outlived the hangup").toBe(false);
+  expect(code).toBe(1);
 }, 30000);
