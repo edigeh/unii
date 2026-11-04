@@ -6,7 +6,8 @@
 // the test never touches the first copy. The session gets its history
 // and memory tree, the source's files stay byte for byte as they were, a
 // turn on the session goes on from the imported chat, a session open in
-// another live unii is not the one `latest` gives.
+// another live unii is not the one `latest` gives, an import a kill cuts
+// leaves nothing a next start doesn't remove.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -96,4 +97,103 @@ test("latest: the newest session no live unii holds, print runs aside", () => {
   expect(Store.lock(a.dir)).toBe(true);
   Store.unlock(a.dir);
   expect(fs.existsSync(a.dir + "/lock")).toBe(false);
+});
+
+function stale_copy(home: string, name: string, lock?: string): string {
+  const dir = home + "/" + name;
+  fs.mkdirSync(dir + "/main", { recursive: true });
+  fs.writeFileSync(dir + "/main/2026-01-01.jsonl", "half a copy");
+  if (lock !== undefined) {
+    fs.writeFileSync(dir + "/lock", lock);
+  }
+  return dir;
+}
+
+test("an import killed mid-copy leaves nothing once the next unii starts", async () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd3-"));
+  const big = DIR + "/big";
+  fs.cpSync(SRC, big, { recursive: true });
+  fs.mkdirSync(big + "/docs", { recursive: true });
+  for (let k = 0; k < 6000; k++) {
+    fs.writeFileSync(big + "/docs/f" + k, "x".repeat(256));
+  }
+  const unii = (...args: string[]) => Bun.spawn(["bun", import.meta.dir + "/unii.ts", ...args], { cwd, env: { ...process.env, UNII_DIR: DIR }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  const home = Store.home(cwd);
+  const entries = () => (fs.existsSync(home) ? fs.readdirSync(home) : []);
+  const copying = unii("--import", big);
+  while (entries().length === 0 && copying.exitCode === null) {
+    await Bun.sleep(1);
+  }
+  copying.kill(9);
+  await copying.exited;
+  expect(copying.signalCode, "the copy was still running when it was killed").toBe("SIGKILL");
+  expect(entries().length, "the kill left the copy behind").toBe(1);
+  expect(Store.list(cwd), "a cut copy is no session").toEqual([]);
+  expect(await unii("--new").exited, "no terminal: the session made and no chat").toBe(2);
+  const sessions = Store.list(cwd).map((s) => s.id);
+  expect(sessions.length).toBe(1);
+  expect(entries(), "the next start removed the copy").toEqual(sessions);
+});
+
+test("an import removes dead imports' copies only: a live one's, and any other dir, stay", () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd4-"));
+  const home = Store.home(cwd);
+  const live = Bun.spawn(["sleep", "5"]);
+  const dead = stale_copy(home, "dead.part", "999999");
+  const unlocked = stale_copy(home, "unlocked.part");
+  const cut_lock = stale_copy(home, "cut-lock.part", "");
+  const running = stale_copy(home, "running.part", String(live.pid));
+  const other = stale_copy(home, "no-meta-yet");
+  Store.bring(SRC, cwd);
+  live.kill();
+  expect(fs.existsSync(dead), "a dead pid's copy").toBe(false);
+  expect(fs.existsSync(unlocked), "a copy killed before its lock").toBe(false);
+  expect(fs.existsSync(cut_lock), "a copy killed as it wrote its lock").toBe(false);
+  expect(fs.existsSync(running), "a live pid's copy").toBe(true);
+  expect(fs.existsSync(other), "a dir not named .part").toBe(true);
+});
+
+test("a whole copy killed just before its rename is no session", () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd5-"));
+  const part = stale_copy(Store.home(cwd), "2026-01-01T00-00-00-000-abcd.part", "999999");
+  fs.writeFileSync(part + "/meta.json", JSON.stringify({ cwd, made: new Date().toISOString() }));
+  expect(Store.list(cwd)).toEqual([]);
+  expect(Store.latest(cwd)).toBeNull();
+});
+
+test("an import comes whole under its id, unlocked, with no copy left beside it", () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd6-"));
+  const s = Store.bring(SRC, cwd);
+  expect(fs.readdirSync(Store.home(cwd))).toEqual([s.id]);
+  expect(s.dir).toBe(Store.home(cwd) + "/" + s.id);
+  expect(fs.existsSync(s.dir + "/lock")).toBe(false);
+  expect(Store.latest(cwd)!.id).toBe(s.id);
+  expect(Store.read(s.dir)!.count).toBe(s.count);
+});
+
+test("a failed copy leaves nothing", () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd7-"));
+  const src = fs.mkdtempSync(os.tmpdir() + "/unii-store-src-");
+  fs.writeFileSync(src + "/main.index", "");
+  fs.mkdirSync(src + "/docs");
+  fs.writeFileSync(src + "/docs/secret", "x");
+  fs.chmodSync(src + "/docs/secret", 0o000);
+  if (process.getuid?.() === 0) {
+    return;
+  }
+  expect(() => Store.bring(src, cwd)).toThrow();
+  expect(fs.readdirSync(Store.home(cwd))).toEqual([]);
+  fs.chmodSync(src + "/docs/secret", 0o600);
+});
+
+test("a dead import's copy that can't be removed stops no import, and is logged", () => {
+  const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd8-"));
+  const stuck = stale_copy(Store.home(cwd), "stuck.part", "999999");
+  fs.chmodSync(stuck + "/main", 0o555);
+  const s = Store.bring(SRC, cwd);
+  expect(Store.latest(cwd)!.id).toBe(s.id);
+  if (process.getuid?.() !== 0) {
+    expect(fs.readFileSync(DIR + "/errors.log", "utf8")).toContain(stuck);
+  }
+  fs.chmodSync(stuck + "/main", 0o755);
 });
