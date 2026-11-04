@@ -44,6 +44,11 @@ const FILES = ["main", "tree", "main.index", "tree.index", "view.json", "docs", 
 // the bytes read from a log's end to find its last message
 const TAIL = 65536;
 
+// a log's index, as Memory.ts writes it: a slot for each line, its byte at
+// 0, its day at 8 (0: no line), its length at 12
+const SLOT = 16;
+const DAY  = 864e5;
+
 // Store
 // =====
 
@@ -65,12 +70,20 @@ export namespace Store {
   }
 
   export function make(cwd: string, from?: string, print = false): Session {
-    const id = Store.id();
-    const dir = Store.home(cwd) + "/" + id;
+    const dir = Store.home(cwd) + "/" + Store.id();
     fs.mkdirSync(dir, { recursive: true });
+    return Store.stamp(dir, cwd, from, print);
+  }
+
+  // meta.json written: till then no list sees the dir as a session
+  export function stamp(dir: string, cwd: string, from?: string, print = false): Session {
     const meta = { cwd, made: new Date().toISOString(), from, print: print || undefined };
     fs.writeFileSync(dir + "/meta.json", JSON.stringify(meta, null, 2) + "\n");
-    return Store.read(dir)!;
+    const session = Store.read(dir);
+    if (session === null) {
+      throw new Error("the session at " + dir + " can't be read");
+    }
+    return session;
   }
 
   // a session's dir read; null: none there
@@ -78,7 +91,7 @@ export namespace Store {
     try {
       const meta = JSON.parse(fs.readFileSync(dir + "/meta.json", "utf8"));
       const index = dir + "/main.index";
-      const count = fs.existsSync(index) ? fs.statSync(index).size / 16 : 0;
+      const count = fs.existsSync(index) ? fs.statSync(index).size / SLOT : 0;
       const time = fs.existsSync(index) ? fs.statSync(index).mtimeMs : fs.statSync(dir + "/meta.json").mtimeMs;
       return { id: path.basename(dir), dir, cwd: meta.cwd, made: meta.made, from: meta.from, print: meta.print === true, last: Store.last(dir), count, time };
     } catch {
@@ -167,15 +180,73 @@ export namespace Store {
 
   // the server's chat at `src` (a users/<id> dir) copied into a new
   // session of `cwd`; the source is only read. Throws if it holds no chat
+  // or a damaged one. Its meta.json comes last and a failed copy is removed,
+  // so a list never sees it half made, even if a crash cuts the copy
   export function bring(src: string, cwd: string): Session {
     if (!fs.existsSync(src + "/main.index")) {
       throw new Error("no chat to import at " + src);
     }
-    const session = Store.make(cwd, src);
-    for (const name of FILES.filter((name) => fs.existsSync(src + "/" + name))) {
-      fs.cpSync(src + "/" + name, session.dir + "/" + name, { recursive: true, preserveTimestamps: true });
+    const flaw = Store.flaw(src);
+    if (flaw !== null) {
+      throw new Error("no chat to import at " + src + ": " + flaw);
     }
-    return Store.read(session.dir)!;
+    const dir = Store.home(cwd) + "/" + Store.id();
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      for (const name of FILES.filter((name) => fs.existsSync(src + "/" + name))) {
+        fs.cpSync(src + "/" + name, dir + "/" + name, { recursive: true, preserveTimestamps: true });
+      }
+      return Store.stamp(dir, cwd, src);
+    } catch (err) {
+      Store.drop(dir);
+      throw err;
+    }
+  }
+
+  // a session that holds nothing yet, removed
+  export function drop(dir: string): void {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // what is wrong with a chat's logs at `dir`, read as Memory.ts reads them:
+  // an index is whole slots, each at a line of its day's file; null: nothing
+  export function flaw(dir: string): string | null {
+    for (const log of ["main", "tree"]) {
+      const file = dir + "/" + log + ".index";
+      if (!fs.existsSync(file)) {
+        continue;
+      }
+      if (!fs.statSync(file).isFile()) {
+        return log + ".index is not a file";
+      }
+      if (fs.existsSync(dir + "/" + log) && !fs.statSync(dir + "/" + log).isDirectory()) {
+        return log + " is not a directory";
+      }
+      const index = fs.readFileSync(file);
+      if (index.length % SLOT !== 0) {
+        return log + ".index is not a whole number of entries";
+      }
+      const sizes = new Map<number, number>();
+      for (let at = 0; at < index.length; at += SLOT) {
+        const day = index.readUInt32LE(at + 8);
+        if (day === 0) {
+          continue;
+        }
+        const size = sizes.get(day) ?? Store.day_size(dir + "/" + log, day);
+        sizes.set(day, size);
+        if (!(index.readDoubleLE(at) + index.readUInt32LE(at + 12) <= size)) {
+          return log + ".index points at no line of its log";
+        }
+      }
+    }
+    return null;
+  }
+
+  // the bytes of a log's file of a day; -1: no such day or file
+  export function day_size(dir: string, day: number): number {
+    const date = new Date(day * DAY);
+    const file = Number.isNaN(date.getTime()) ? "" : dir + "/" + date.toISOString().slice(0, 10) + ".jsonl";
+    return fs.existsSync(file) ? fs.statSync(file).size : -1;
   }
 
   // the server's chats there are to import: config.DIR/users/<id>

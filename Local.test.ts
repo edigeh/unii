@@ -32,6 +32,7 @@ function hooks(log: string[] = []): Hooks & { log: string[]; ends: boolean[] } {
     mind  : () => {},
     state : () => {},
     ended : (end) => ends.push(end.ok),
+    fault : () => {},
   };
 }
 

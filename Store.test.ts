@@ -24,7 +24,7 @@ const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd-"));
 const COPY = path.join(import.meta.dir, "work/data-copy/users/1");
 const SRC = DIR + "/users/1";
 
-const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {} };
+const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {}, fault: () => {} };
 
 function sums(dir: string): Record<string, string> {
   const out: Record<string, string> = {};

@@ -9,7 +9,8 @@
 // frame per FRAME ms. Esc stops the turn: its stream cut, its running
 // tool's process group killed. Ctrl+O opens tool output or folds it.
 // The terminal is given back as it was on any way out: a quit, a signal,
-// an error no one caught.
+// an error no one caught. What the user's input runs and fails is a note
+// in a chat that goes on (Tui.attempt); only what escapes that is fatal.
 
 import * as os from "node:os";
 import type { Kind } from "./AskAI.ts";
@@ -20,6 +21,7 @@ import { Keys, WAIT, type Key } from "./Keys.ts";
 import type { Live } from "./Live.ts";
 import { Local, type Chat, type Shown } from "./Local.ts";
 import { Login, type Flow, type Provider } from "./Login.ts";
+import { Memory } from "./Memory.ts";
 import { Pick, type Model } from "./Pick.ts";
 import { Price } from "./Price.ts";
 import { Render } from "./Render.ts";
@@ -42,7 +44,7 @@ export type Choice = { label: string; info: string; value: string; right?: strin
 // a picker: its title, choices, the one marked, what is typed to filter
 // them; done: the value chosen, null if none; panel: it takes the editor's
 // place (a model selector) instead of listing under it
-export type Menu = { title: string; all: Choice[]; at: number; query: string; done: (value: string | null) => void; panel?: boolean };
+export type Menu = { title: string; all: Choice[]; at: number; query: string; done: (value: string | null) => void | Promise<void>; panel?: boolean };
 
 // a slash command: its name, its argument's hint, what it does, its run
 export type Cmd = { name: string; arg: string; info: string; run: (t: Tui, arg: string) => void | Promise<void> };
@@ -76,6 +78,10 @@ export type Tui = {
 };
 
 type Timer = ReturnType<typeof setTimeout>;
+
+// a session's chat open and read, not yet what the terminal shows; session:
+// a new one, if another unii held the one asked for
+type Opened = { session: Session; chat: Chat; shown: Shown[]; notes: string[] };
 
 // Constants
 // =========
@@ -160,7 +166,7 @@ export namespace Tui {
       render: Render.make(out, w, h), menu: null, login: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
       frame: 0, started: 0, out, done, closing: false, attached: false, given: false,
     };
-    Tui.open(t, session);
+    Tui.enter(t, Tui.open(t, session));
     return t;
   }
 
@@ -210,16 +216,9 @@ export namespace Tui {
     t.render.row = 0;
   }
 
-  export function open(t: Tui, session: Session): void {
-    if (!Store.lock(session.dir)) {
-      session = Store.make(session.cwd);
-      Store.lock(session.dir);
-      t.notes.push("That session is open in another unii; this is a new one.");
-    }
-    t.session = session;
-    t.items = [];
-    t.live = [];
-    t.mind = "";
+  // a session's chat opened and read, the chat on screen untouched: a
+  // session that won't open fails here, held by no one
+  export function open(t: Tui, session: Session): Opened {
     const hooks = {
       entry : (m: Shown) => Tui.entry(t, m),
       live  : (live: Live[]) => {
@@ -235,9 +234,36 @@ export namespace Tui {
         t.mind = "";
         Tui.draw(t);
       },
+      fault : (why: string) => Tui.note(t, why),
     };
-    t.chat = Local.open(session.dir, session.cwd, hooks);
-    const shown = Local.tail(t.chat, TAIL);
+    const notes: string[] = [];
+    let chat: Chat | null = null;
+    try {
+      if (!Store.lock(session.dir)) {
+        session = Store.make(session.cwd);
+        Store.lock(session.dir);
+        notes.push("That session is open in another unii; this is a new one.");
+      }
+      chat = Local.open(session.dir, session.cwd, hooks);
+      return { session, chat, shown: Local.tail(chat, TAIL), notes };
+    } catch (err: any) {
+      if (chat !== null) {
+        Memory.stop(chat.mem);
+      }
+      Store.unlock(session.dir);
+      // the disk's own errors say what to fix; any other is a bad value read
+      throw new Error("Session " + session.id + " can't be opened: " + (err?.code === undefined ? "its files are damaged." : err.message));
+    }
+  }
+
+  // a chat opened, on screen; a turn a crash cut goes on
+  export function enter(t: Tui, { session, chat, shown, notes }: Opened): void {
+    t.session = session;
+    t.chat = chat;
+    t.items = [];
+    t.live = [];
+    t.mind = "";
+    t.notes.push(...notes);
     t.earlier = shown.length === 0 ? t.chat.mem.count : shown[0].id;
     shown.forEach((m) => Tui.entry(t, m, false));
     t.ed.history = t.items.filter((i) => i.kind === "user").map((i) => i.text).slice(-500);
@@ -273,17 +299,34 @@ export namespace Tui {
       t.flush = null;
     }
     for (const k of Keys.feed(t.keys, chunk)) {
-      Tui.key(t, k);
+      Tui.attempt(t, () => Tui.key(t, k));
     }
     if (Keys.waiting(t.keys)) {
       t.flush = setTimeout(() => {
         t.flush = null;
-        Keys.flush(t.keys).forEach((k) => Tui.key(t, k));
+        Keys.flush(t.keys).forEach((k) => Tui.attempt(t, () => Tui.key(t, k)));
       }, WAIT);
     }
   }
 
-  export function key(t: Tui, k: Key): void {
+  // what a key runs: what it throws or rejects with, as a bad path or a
+  // failing disk, is a note. Leaving has no chat to note it in: that stays
+  // fatal, as an unhandled rejection (Tui.attach)
+  export function attempt(t: Tui, run: () => void | Promise<void>): void {
+    new Promise<void>((ok) => ok(run())).catch((err) => {
+      if (t.closing) {
+        throw err;
+      }
+      Tui.note(t, String(err?.message ?? err));
+    });
+  }
+
+  export function note(t: Tui, text: string): void {
+    t.notes.push(text);
+    Tui.draw(t);
+  }
+
+  export function key(t: Tui, k: Key): void | Promise<void> {
     if (t.closing) {
       return;
     }
@@ -337,16 +380,12 @@ export namespace Tui {
       }
     }
     const did = Editor.key(t.ed, k, Tui.cols(t));
-    if (did === "send") {
-      const text = Editor.take(t.ed);
-      if (t.login === null) {
-        Tui.send(t, text);
-      } else {
-        Tui.login_submit(t, text);
-      }
-    }
     t.pick = did === "edit" ? 0 : t.pick;
     Tui.draw(t);
+    if (did === "send") {
+      const text = Editor.take(t.ed);
+      return t.login === null ? Tui.send(t, text) : Tui.login_submit(t, text);
+    }
   }
 
   export function ctrl_c(t: Tui): void {
@@ -367,7 +406,7 @@ export namespace Tui {
   }
 
   // the message sent, or the command run
-  export function send(t: Tui, text: string): void {
+  export function send(t: Tui, text: string): void | Promise<void> {
     t.notes = [];
     const trimmed = text.trim();
     if (trimmed === "") {
@@ -380,11 +419,7 @@ export namespace Tui {
         t.notes.push(word + " is no command; nothing was sent. /help lists them.");
         return;
       }
-      Promise.resolve(cmd.run(t, trimmed.slice(word.length).trim())).catch((err) => {
-        t.notes.push(String(err?.message ?? err));
-        Tui.draw(t);
-      });
-      return;
+      return cmd.run(t, trimmed.slice(word.length).trim());
     }
     Local.say(t.chat, text);
   }
@@ -395,7 +430,7 @@ export namespace Tui {
     return m === null ? [] : CMDS.filter((c) => c.name.startsWith(m[0].toLowerCase()));
   }
 
-  export function menu_key(t: Tui, k: Key): void {
+  export function menu_key(t: Tui, k: Key): void | Promise<void> {
     const menu = t.menu!;
     const list = Tui.filtered(menu);
     if (k.$ === "text" || k.$ === "paste") {
@@ -413,7 +448,8 @@ export namespace Tui {
       const hit = list[menu.at];
       if (hit !== undefined) {
         t.menu = null;
-        menu.done(hit.value);
+        Tui.draw(t);
+        return menu.done(hit.value);
       }
     }
     Tui.draw(t);
@@ -479,7 +515,7 @@ export namespace Tui {
 
   // what was pasted for the open sign-in, sent to it: a token kept, the
   // vendor offered from now on (Config.ts), a note saying whose it is
-  export function login_submit(t: Tui, text: string): void {
+  export function login_submit(t: Tui, text: string): void | Promise<void> {
     const login = t.login;
     if (login === null || text.trim() === "") {
       return;
@@ -487,7 +523,7 @@ export namespace Tui {
     const spec = Login.PROVIDERS.find((p) => p.id === login.id)!;
     t.notes = ["Signing in to " + spec.name + "…"];
     Tui.draw(t);
-    login.flow.submit(text).then(() => {
+    return login.flow.submit(text).then(() => {
       if (t.login !== login) {
         return;
       }
@@ -565,7 +601,7 @@ export namespace Tui {
       done: (dir) => {
         const s = dir === null ? null : Store.read(dir);
         if (s !== null && s.id !== t.session.id) {
-          Tui.switch_to(t, s);
+          return Tui.switch_to(t, s);
         }
         Tui.draw(t);
       },
@@ -573,20 +609,30 @@ export namespace Tui {
     Tui.draw(t);
   }
 
-  // another session in this terminal: the chat open closed first
+  // another session in this terminal: it opens first, so one that won't
+  // leaves this chat as it was; this chat closes before the new one's turn
+  // goes on, as closing kills every tool this process runs (Machine.end)
   export async function switch_to(t: Tui, s: Session): Promise<void> {
+    const next = Tui.open(t, s);
     Local.interrupt(t.chat, "Stopped: another session opened.");
     await Local.close(t.chat);
     Store.unlock(t.session.dir);
-    Tui.open(t, s);
+    Tui.enter(t, next);
     Tui.draw(t);
   }
 
-  export function bring(t: Tui, arg: string): Promise<void> {
+  export async function bring(t: Tui, arg: string): Promise<void> {
     const src = arg === "" ? config.DIR + "/users/1" : arg.replace(/^~(?=\/|$)/, os.homedir());
     const s = Store.bring(src, t.session.cwd);
-    t.notes.push("Imported " + src + " as a new session: " + s.count + " lines.");
-    return Tui.switch_to(t, s);
+    try {
+      await Tui.switch_to(t, s);
+    } catch (err) {
+      if (t.session.id !== s.id) {
+        Store.drop(s.dir);
+      }
+      throw err;
+    }
+    Tui.note(t, "Imported " + src + " as a new session: " + s.count + " lines.");
   }
 
   export function goal(t: Tui, arg: string): void {

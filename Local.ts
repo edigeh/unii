@@ -36,13 +36,15 @@ export type Msg = { id: number; end: number };
 export type Shown = { id: number; kind: Kind; text: string; date: string; more: boolean };
 
 // what the chat tells its terminal (or print mode): each message logged,
-// what streams, a thought (shown, never logged), its state, a call's end
+// what streams, a thought (shown, never logged), its state, a call's end,
+// what a turn failed to write (the log may be what fails: told, not logged)
 export type Hooks = {
   entry : (msg: Shown) => void;
   live  : (live: Live[]) => void;
   mind  : (text: string) => void;
   state : () => void;
   ended : (end: End) => void;
+  fault : (why: string) => void;
 };
 
 // the tokens a turn's last request read (its context) and wrote, and
@@ -184,7 +186,7 @@ export namespace Local {
     }
     chat.wait.push(msg);
     if (!chat.busy) {
-      Local.turn(chat);
+      Local.turn(chat).catch((err) => chat.hooks.fault(String(err?.message ?? err)));
     }
   }
 
@@ -199,15 +201,16 @@ export namespace Local {
       Local.failed(chat, String(err?.message ?? err));
     } finally {
       const why = chat.halt.signal.aborted ? chat.halt.signal.reason : null;
-      if (typeof why === "string") {
-        Local.push(chat, "note", why);
-      }
       chat.call  = null;
       chat.sent  = [];
       chat.wait  = [];
       chat.busy  = false;
       chat.tool  = null;
       Local.live(chat, []);
+      // the writes last: a failing disk leaves the chat idle, to send again
+      if (typeof why === "string") {
+        Local.push(chat, "note", why);
+      }
       Local.change(chat);
     }
   }
