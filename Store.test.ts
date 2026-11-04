@@ -172,15 +172,15 @@ test("an import comes whole under its id, unlocked, with no copy left beside it"
 });
 
 test("a failed copy leaves nothing", () => {
+  if (process.getuid?.() === 0) {
+    return;
+  }
   const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd7-"));
   const src = fs.mkdtempSync(os.tmpdir() + "/unii-store-src-");
   fs.writeFileSync(src + "/main.index", "");
   fs.mkdirSync(src + "/docs");
   fs.writeFileSync(src + "/docs/secret", "x");
   fs.chmodSync(src + "/docs/secret", 0o000);
-  if (process.getuid?.() === 0) {
-    return;
-  }
   expect(() => Store.bring(src, cwd)).toThrow();
   expect(fs.readdirSync(Store.home(cwd))).toEqual([]);
   fs.chmodSync(src + "/docs/secret", 0o600);
