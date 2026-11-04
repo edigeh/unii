@@ -103,7 +103,11 @@ export async function print(cwd: string, text: string): Promise<number> {
       process.stderr.write("unii: " + m.text + "\n");
     }
   };
-  const chat = Local.open(session.dir, cwd, { entry, live: () => {}, mind: () => {}, state: () => {}, ended: (end) => ends.push(end) });
+  const fault = (why: string) => {
+    failed = true;
+    process.stderr.write("unii: " + why + "\n");
+  };
+  const chat = Local.open(session.dir, cwd, { entry, live: () => {}, mind: () => {}, state: () => {}, ended: (end) => ends.push(end), fault });
   const stop = () => Local.interrupt(chat, "Stopped by a signal.");
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);

@@ -6,7 +6,9 @@
 // renderer's frames, drawn by their changes only, match the frame on the
 // screen and in the scrollback, a resize too; the whole interactive mode:
 // a 200-line paste goes as one message, Esc stops a reply, a resize mid
-// stream leaves every row whole.
+// stream leaves every row whole; what the user's input runs and fails, a
+// bad path, a failing disk, a damaged session, is a note in a chat that
+// goes on.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -344,5 +346,233 @@ describe("interactive mode", () => {
       }
     }
     expect(size().w).toBeGreaterThan(0);
+  });
+});
+
+describe("input errors", () => {
+  function fresh(): string {
+    return fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-tui-err-"));
+  }
+
+  function started(cwd: string) {
+    const term = term_make(120, 40);
+    const t = Tui.make(Store.make(cwd), (s) => term_write(term, s), 120, 40, () => {});
+    return { t, shown: () => (Tui.show(t), term_all(term).join("\n")) };
+  }
+
+  async function answered({ t, shown }: ReturnType<typeof started>, text: string): Promise<void> {
+    STUB.script = () => [{ t: "text", x: "reply to " + text }];
+    Tui.input(t, text + "\r");
+    await until(() => !t.chat.busy && shown().includes("reply to " + text));
+    expect(shown()).toContain("reply to " + text);
+  }
+
+  // a chat with a message and its reply, closed; its session's dir
+  async function older(cwd: string): Promise<string> {
+    const chat = started(cwd);
+    await answered(chat, "an older chat");
+    await Tui.leave(chat.t);
+    return chat.t.session.dir;
+  }
+
+  async function noted(t: ReturnType<typeof started>["t"]): Promise<string> {
+    await until(() => t.notes.length > 0);
+    return t.notes.join(" ");
+  }
+
+  test("/import of a missing dir leaves the session running with a note on screen", async () => {
+    const chat = started(fresh());
+    const { id } = chat.t.session;
+    Tui.input(chat.t, "/import /nothing/here\r");
+    await noted(chat.t);
+    expect(chat.shown()).toContain("no chat to import at /nothing/here");
+    expect(chat.shown()).not.toContain("Imported");
+    expect(chat.t.session.id).toBe(id);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  const BAD: Array<[string, (src: string) => void]> = [
+    ["a main.index cut short", (src) => fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1))],
+    ["a main.index of whole entries of garbage", (src) => fs.writeFileSync(src + "/main.index", Buffer.alloc(16, 0xff))],
+    ["a main.index that is a directory", (src) => fs.mkdirSync(src + "/main.index")],
+    ["a main that is a file", (src) => {
+      fs.writeFileSync(src + "/main.index", "");
+      fs.writeFileSync(src + "/main", "x");
+    }],
+    ["a main that can't be read", (src) => {
+      fs.writeFileSync(src + "/main.index", "");
+      fs.mkdirSync(src + "/main", { mode: 0o000 });
+    }],
+  ];
+
+  for (const [name, spoil] of BAD) {
+    test("a failed import of " + name + " leaves no new session and the latest as it was", async () => {
+      const cwd = fresh();
+      const chat = started(cwd);
+      const src = fresh();
+      spoil(src);
+      const before = fs.readdirSync(Store.home(cwd));
+      const latest = Store.latest(cwd)!.id;
+      Tui.input(chat.t, "/import " + src + "\r");
+      const note = await noted(chat.t);
+      expect(note).not.toContain("Imported");
+      expect(note).not.toContain("null is not");
+      expect(note).not.toContain("Invalid Date");
+      expect(fs.readdirSync(Store.home(cwd))).toEqual(before);
+      expect(Store.latest(cwd)!.id).toBe(latest);
+      await answered(chat, "still here");
+      await Tui.leave(chat.t);
+      fs.chmodSync(src, 0o755);
+      if (fs.existsSync(src + "/main")) {
+        fs.chmodSync(src + "/main", 0o755);
+      }
+    });
+  }
+
+  function garble(dir: string): void {
+    const day = dir + "/main/" + fs.readdirSync(dir + "/main")[0];
+    const lines = fs.readFileSync(day, "utf8").split("\n");
+    lines[0] = "x".repeat(lines[0].length);
+    fs.writeFileSync(day, lines.join("\n"));
+  }
+
+  test("an import that passes its checks and won't open leaves no new session", async () => {
+    const cwd = fresh();
+    const src = await older(fresh());
+    garble(src);
+    const chat = started(cwd);
+    const before = fs.readdirSync(Store.home(cwd));
+    const latest = Store.latest(cwd)!.id;
+    Tui.input(chat.t, "/import " + src + "\r");
+    expect(await noted(chat.t)).toContain("can't be opened");
+    expect(chat.t.notes.join(" ")).not.toContain("Imported");
+    expect(fs.readdirSync(Store.home(cwd))).toEqual(before);
+    expect(Store.latest(cwd)!.id).toBe(latest);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  const DAMAGED: Array<[string, (dir: string) => void, (dir: string) => void]> = [
+    ["a corrupt main.index", (dir) => fs.writeFileSync(dir + "/main.index", Buffer.alloc(16, 0xff)), () => {}],
+    ["a log line of garbage", garble, () => {}],
+    ["a dir it can't write", (dir) => fs.chmodSync(dir, 0o555), (dir) => fs.chmodSync(dir, 0o755)],
+  ];
+
+  for (const [name, spoil, mend] of DAMAGED) {
+    test("a failed /resume pick of " + name + " leaves the old chat answering", async () => {
+      const cwd = fresh();
+      const dir = await older(cwd);
+      const chat = started(cwd);
+      await answered(chat, "this chat");
+      const { id } = chat.t.session;
+      spoil(dir);
+      Tui.input(chat.t, "/resume\r");
+      Tui.input(chat.t, "older");
+      Tui.input(chat.t, "\r");
+      const note = await noted(chat.t);
+      expect(note).toContain("can't be opened");
+      expect(note).not.toContain("Invalid Date");
+      expect(note).not.toContain("JSON Parse");
+      expect(chat.t.session.id).toBe(id);
+      expect(chat.shown()).toContain("reply to this chat");
+      expect(fs.readFileSync(chat.t.session.dir + "/lock", "utf8")).toBe(String(process.pid));
+      expect(fs.existsSync(dir + "/lock")).toBe(false);
+      await answered(chat, "still here");
+      expect(Store.last(chat.t.session.dir)!.text).toBe("reply to still here");
+      await Tui.leave(chat.t);
+      mend(dir);
+    });
+  }
+
+  test("a failed /resume pick leaves a turn that runs running", async () => {
+    const cwd = fresh();
+    const dir = await older(cwd);
+    fs.writeFileSync(dir + "/main.index", Buffer.alloc(16, 0xff));
+    const chat = started(cwd);
+    STUB.script = () => [{ t: "wait", ms: 200 }, { t: "text", x: "the turn went on" }];
+    Tui.input(chat.t, "go\r");
+    await until(() => chat.t.chat.call !== null);
+    Tui.input(chat.t, "/resume\r");
+    Tui.input(chat.t, "older");
+    Tui.input(chat.t, "\r");
+    await noted(chat.t);
+    await until(() => chat.shown().includes("the turn went on"));
+    expect(chat.shown()).toContain("the turn went on");
+    await Tui.leave(chat.t);
+  });
+
+  test("a command that throws is a note, the chat goes on", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    fs.chmodSync(dir, 0o555);
+    Tui.input(chat.t, "/model haiku\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    fs.chmodSync(dir, 0o755);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("/new where no session can be made is a note", async () => {
+    const cwd = fresh();
+    const chat = started(cwd);
+    const { id } = chat.t.session;
+    fs.chmodSync(Store.home(cwd), 0o555);
+    Tui.input(chat.t, "/new\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    fs.chmodSync(Store.home(cwd), 0o755);
+    expect(chat.t.session.id).toBe(id);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("a picker's Enter that throws is a note, the chat goes on", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    Tui.input(chat.t, "/model\r");
+    Tui.input(chat.t, "haiku");
+    fs.chmodSync(dir, 0o555);
+    Tui.input(chat.t, "\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    expect(chat.t.menu).toBe(null);
+    fs.chmodSync(dir, 0o755);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("a message with its session's dir gone is a note", async () => {
+    const chat = started(fresh());
+    fs.rmSync(chat.t.session.dir, { recursive: true });
+    Tui.input(chat.t, "hello\r");
+    expect(await noted(chat.t)).toContain("ENOENT");
+    expect(chat.t.chat.busy).toBe(false);
+    await Tui.leave(chat.t);
+  });
+
+  test("a message with its session's dir unwritable is a note, and the next one answered", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    fs.chmodSync(dir, 0o555);
+    Tui.input(chat.t, "hello\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    await until(() => !chat.t.chat.busy);
+    expect(chat.t.chat.busy).toBe(false);
+    fs.chmodSync(dir, 0o755);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("a good /import shows its history, says so, and answers", async () => {
+    const cwd = fresh();
+    const src = await older(fresh());
+    const chat = started(cwd);
+    const first = chat.t.session;
+    Tui.input(chat.t, "/import " + src + "\r");
+    await until(() => chat.t.session.id !== first.id && chat.t.notes.length > 0);
+    expect(chat.t.notes.join(" ")).toContain("Imported " + src + " as a new session: 2 lines.");
+    expect(chat.shown()).toContain("reply to an older chat");
+    expect(fs.existsSync(first.dir + "/lock")).toBe(false);
+    await answered(chat, "goes on");
+    await Tui.leave(chat.t);
   });
 });
