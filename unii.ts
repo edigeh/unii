@@ -114,6 +114,7 @@ export async function print(cwd: string, text: string): Promise<number> {
   const stop = () => Local.interrupt(chat, "Stopped by a signal.");
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  process.on("SIGHUP", stop);
   Local.say(chat, text);
   while (chat.busy) {
     await Bun.sleep(20);
