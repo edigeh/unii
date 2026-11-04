@@ -474,6 +474,11 @@ describe("input errors", () => {
     ["a main.index of zeros", (dir) => fs.writeFileSync(dir + "/main.index", Buffer.alloc(32)), IS_DAMAGED, () => {}],
     ["a main.index cut short", (dir) => fs.appendFileSync(dir + "/main.index", Buffer.alloc(5)), IS_DAMAGED, () => {}],
     ["a slot past its file", slot_past_its_file, IS_DAMAGED, () => {}],
+    ["a slot of an impossible day", (dir) => {
+      const index = fs.readFileSync(dir + "/main.index");
+      index.writeUInt32LE(0xffffffff, 8);
+      fs.writeFileSync(dir + "/main.index", index);
+    }, IS_DAMAGED, () => {}],
     ["a log line of garbage", garble, IS_DAMAGED, () => {}],
     ["a log shorter than its saved end", first_line_only, IS_DAMAGED, () => {}],
     ["a saved end that is no number", (dir) => saved_end(dir, "main", [JSON.parse(fs.readFileSync(dir + "/view.json", "utf8")).main[0], "x" as any]), IS_DAMAGED, () => {}],
@@ -677,6 +682,24 @@ describe("input errors", () => {
     await answered(chat, "still here");
     await Tui.leave(chat.t);
   });
+
+  for (const [name, text] of [["an object with no parts", "{}"], ["a number", "5"], ["parts of no pairs", '{"parts":[null]}'], ["a seen with no parts", '{"parts":[],"seen":{}}']]) {
+    test("a /resume pick whose view.json is " + name + " rebuilds from the logs, as an unreadable one does", async () => {
+      const cwd = fresh();
+      const dir = await older(cwd);
+      fs.writeFileSync(dir + "/view.json", text);
+      const chat = started(cwd);
+      const { id } = chat.t.session;
+      Tui.input(chat.t, "/resume\r");
+      Tui.input(chat.t, "older");
+      Tui.input(chat.t, "\r");
+      await until(() => chat.t.session.id !== id || chat.t.notes.length > 0);
+      expect(chat.t.notes.join(" ")).toBe("");
+      expect(chat.shown()).toContain("reply to an older chat");
+      await answered(chat, "goes on");
+      await Tui.leave(chat.t);
+    });
+  }
 
   const REBUILT: Array<[string, (src: string) => void]> = [
     ["a main.index cut short and no view.json", (src) => {
