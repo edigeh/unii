@@ -8,8 +8,9 @@
 // a 200-line paste goes as one message, Esc stops a reply, a resize mid
 // stream leaves every row whole; what the user's input runs and fails, a
 // bad path, a failing disk, a damaged session, a code bug, is a note in a
-// chat that goes on, its stack in errors.log; a switch of session while a
-// reply runs, or typed over.
+// chat that goes on, its stack in errors.log, the command without effect,
+// a message back in the editor; a switch of session while a reply runs, or
+// typed over.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -22,6 +23,7 @@ const { Render } = await import("./Render.ts");
 const { Tui, size } = await import("./Tui.ts");
 const { Store } = await import("./Store.ts");
 const { Local } = await import("./Local.ts");
+const { Memory } = await import("./Memory.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 const { term_make, term_write, term_screen, term_all, plain } = await import("./term.stub.ts");
 const { width } = await import("./Draw.ts");
@@ -381,6 +383,41 @@ describe("input errors", () => {
     return t.notes.join(" ");
   }
 
+  // the user's messages in a session's log, as many times as logged
+  function logged(dir: string): string[] {
+    const lines = fs.readdirSync(dir + "/main").flatMap((f) => fs.readFileSync(dir + "/main/" + f, "utf8").split("\n").filter(Boolean));
+    return lines.map((line) => JSON.parse(line)).filter((m) => m.kind === "user").map((m) => m.text);
+  }
+
+  function status({ t }: ReturnType<typeof started>): string {
+    return plain(Tui.status(t, 1000));
+  }
+
+  // a message refused at `file` (0o555 a dir, 0o444 a file): noted, nothing
+  // logged, back in the editor; Enter, once writable, sends it once
+  async function refused(cwd: string, file: (dir: string) => string, mode: number, back: number): Promise<void> {
+    const chat = started(cwd);
+    const { dir } = chat.t.session;
+    fs.chmodSync(file(dir), mode);
+    Tui.input(chat.t, "hello\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    await until(() => !chat.t.chat.busy);
+    expect(chat.t.chat.busy).toBe(false);
+    expect(logged(dir)).toEqual([]);
+    expect(chat.t.ed.text).toBe("hello");
+    expect(chat.shown()).toContain("› hello");
+    fs.chmodSync(file(dir), back);
+    STUB.script = () => [{ t: "text", x: "reply to the one sent" }];
+    Tui.input(chat.t, "\r");
+    await until(() => !chat.t.chat.busy && chat.shown().includes("reply to the one sent"));
+    expect(chat.shown()).toContain("reply to the one sent");
+    expect(logged(dir)).toEqual(["hello"]);
+    expect(chat.t.ed.text).toBe("");
+    expect(chat.t.ed.history).toEqual(["hello"]);
+    expect(STUB.reqs.at(-1)!.last).toContain("hello");
+    await Tui.leave(chat.t);
+  }
+
   test("/import of a missing dir leaves the session running with a note on screen", async () => {
     const chat = started(fresh());
     const { id } = chat.t.session;
@@ -668,19 +705,93 @@ describe("input errors", () => {
     Tui.input(chat.t, "hello\r");
     expect(await noted(chat.t)).toContain("ENOENT");
     expect(chat.t.chat.busy).toBe(false);
+    expect(chat.t.ed.text).toBe("hello");
     await Tui.leave(chat.t);
   });
 
-  test("a message with its session's dir unwritable is a note, and the next one answered", async () => {
+  test("a message with its session's dir unwritable is a note, back in the editor, sent once by Enter", async () => {
+    await refused(fresh(), (dir) => dir, 0o555, 0o755);
+  });
+
+  test("a message its log's dir refuses is a note, back in the editor, sent once by Enter", async () => {
+    await refused(fresh(), (dir) => dir + "/main", 0o555, 0o755);
+  });
+
+  test("a message its log's index refuses is a note, back in the editor, sent once by Enter", async () => {
+    await refused(fresh(), (dir) => dir + "/main.index", 0o444, 0o644);
+  });
+
+  test("a message logged before a later write fails stays out of the editor, so it isn't sent twice", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    fs.chmodSync(dir + "/tree", 0o555);
+    Tui.input(chat.t, "hello\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    expect(logged(dir)).toEqual(["hello"]);
+    expect(chat.t.ed.text).toBe("");
+    fs.chmodSync(dir + "/tree", 0o755);
+    await answered(chat, "still here");
+    expect(logged(dir)).toEqual(["hello", "still here"]);
+    await Tui.leave(chat.t);
+  });
+
+  test("a /model or /effort that can't be saved keeps the old values on the status line", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    const was = status(chat);
+    fs.chmodSync(dir, 0o555);
+    for (const cmd of ["/model haiku", "/effort high"]) {
+      chat.t.notes = [];
+      Tui.input(chat.t, cmd + "\r");
+      expect(await noted(chat.t)).toContain("EACCES");
+      expect(status(chat)).toBe(was);
+    }
+    fs.chmodSync(dir, 0o755);
+    await answered(chat, "still here");
+    expect(status(chat)).toStartWith(was.split(" ").slice(0, 2).join(" "));
+    await Tui.leave(chat.t);
+  });
+
+  test("a /goal that can't be saved sets no goal: nothing logged, the next message unchecked", async () => {
     const chat = started(fresh());
     const { dir } = chat.t.session;
     fs.chmodSync(dir, 0o555);
-    Tui.input(chat.t, "hello\r");
+    Tui.input(chat.t, "/goal ship it\r");
     expect(await noted(chat.t)).toContain("EACCES");
-    await until(() => !chat.t.chat.busy);
-    expect(chat.t.chat.busy).toBe(false);
+    expect(status(chat)).not.toContain("goal:");
+    expect(logged(dir)).toEqual([]);
     fs.chmodSync(dir, 0o755);
     await answered(chat, "still here");
+    expect(logged(dir)).toEqual(["still here"]);
+    expect(Memory.saved(dir)!.goal).toBe(null);
+    await Tui.leave(chat.t);
+  });
+
+  test("a /goal whose message can't be logged sets no goal", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    fs.chmodSync(dir + "/main", 0o555);
+    Tui.input(chat.t, "/goal ship it\r");
+    expect(await noted(chat.t)).toContain("EACCES");
+    fs.chmodSync(dir + "/main", 0o755);
+    expect(status(chat)).not.toContain("goal:");
+    expect(Memory.saved(dir)!.goal).toBe(null);
+    await answered(chat, "still here");
+    expect(logged(dir)).toEqual(["still here"]);
+    await Tui.leave(chat.t);
+  });
+
+  test("a /goal on a healthy disk is saved, logged once, and checked", async () => {
+    const chat = started(fresh());
+    const { dir } = chat.t.session;
+    STUB.script = (req) => [{ t: "text", x: req.last.includes("The goal:") ? "yes" : "working on it" }];
+    Tui.input(chat.t, "/goal ship it\r");
+    expect(status(chat)).toContain("goal: ship it");
+    expect(Memory.saved(dir)!.goal).toBe("ship it");
+    await until(() => !chat.t.chat.busy && chat.shown().includes("Goal met."));
+    expect(chat.shown()).toContain("Goal met.");
+    expect(logged(dir)).toEqual(["/goal ship it"]);
+    expect(chat.t.chat.mem.goal).toBe(null);
     await Tui.leave(chat.t);
   });
 

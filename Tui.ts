@@ -479,7 +479,16 @@ export namespace Tui {
       }
       return cmd.run(t, trimmed.slice(word.length).trim());
     }
-    Local.say(t.chat, text);
+    const count = t.chat.mem.count;
+    try {
+      Local.say(t.chat, text);
+    } catch (err) {
+      // logged before what threw: back in the editor, Enter would send it twice
+      if (t.chat.mem.count === count) {
+        Editor.set(t.ed, text);
+      }
+      throw err;
+    }
   }
 
   // the commands matching what is typed: a slash and a word, no more
@@ -733,8 +742,10 @@ export namespace Tui {
       t.notes.push("/goal needs one: /goal <message>.");
       return Tui.draw(t);
     }
-    Local.goal(t.chat, arg);
+    // the message first: one that can't be logged leaves no goal to check.
+    // Both run before the turn's first wait, so its check sees the goal
     Local.say(t.chat, "/goal " + arg);
+    Local.goal(t.chat, arg);
   }
 
   export function fold(t: Tui): void {
