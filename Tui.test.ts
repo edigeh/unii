@@ -7,8 +7,8 @@
 // screen and in the scrollback, a resize too; the whole interactive mode:
 // a 200-line paste goes as one message, Esc stops a reply, a resize mid
 // stream leaves every row whole; what the user's input runs and fails, a
-// bad path, a failing disk, a damaged session, is a note in a chat that
-// goes on.
+// bad path, a failing disk, a damaged session, a code bug, is a note in a
+// chat that goes on, its stack in errors.log.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -28,6 +28,7 @@ const { width } = await import("./Draw.ts");
 type Key = import("./Keys.ts").Key;
 
 const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-tui-cwd-"));
+const LOG = DIR + "/errors.log";
 
 beforeAll(stub_install);
 afterAll(stub_remove);
@@ -392,8 +393,6 @@ describe("input errors", () => {
   });
 
   const BAD: Array<[string, (src: string) => void]> = [
-    ["a main.index cut short", (src) => fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1))],
-    ["a main.index of whole entries of garbage", (src) => fs.writeFileSync(src + "/main.index", Buffer.alloc(16, 0xff))],
     ["a main.index that is a directory", (src) => fs.mkdirSync(src + "/main.index")],
     ["a main that is a file", (src) => {
       fs.writeFileSync(src + "/main.index", "");
@@ -444,7 +443,7 @@ describe("input errors", () => {
     const before = fs.readdirSync(Store.home(cwd));
     const latest = Store.latest(cwd)!.id;
     Tui.input(chat.t, "/import " + src + "\r");
-    expect(await noted(chat.t)).toContain("can't be opened");
+    expect(await noted(chat.t)).toContain("can't be opened: its files are damaged: ");
     expect(chat.t.notes.join(" ")).not.toContain("Imported");
     expect(fs.readdirSync(Store.home(cwd))).toEqual(before);
     expect(Store.latest(cwd)!.id).toBe(latest);
@@ -452,13 +451,41 @@ describe("input errors", () => {
     await Tui.leave(chat.t);
   });
 
-  const DAMAGED: Array<[string, (dir: string) => void, (dir: string) => void]> = [
-    ["a corrupt main.index", (dir) => fs.writeFileSync(dir + "/main.index", Buffer.alloc(16, 0xff)), () => {}],
-    ["a log line of garbage", garble, () => {}],
-    ["a dir it can't write", (dir) => fs.chmodSync(dir, 0o555), (dir) => fs.chmodSync(dir, 0o755)],
+  function saved_end(dir: string, log: string, end: [number, number]): void {
+    const view = JSON.parse(fs.readFileSync(dir + "/view.json", "utf8"));
+    fs.writeFileSync(dir + "/view.json", JSON.stringify({ ...view, [log]: end }));
+  }
+
+  function first_line_only(dir: string): void {
+    const day = dir + "/main/" + fs.readdirSync(dir + "/main")[0];
+    fs.writeFileSync(day, fs.readFileSync(day, "utf8").split("\n")[0] + "\n");
+  }
+
+  function slot_past_its_file(dir: string): void {
+    const index = fs.readFileSync(dir + "/main.index");
+    index.writeDoubleLE(1e9, 16);
+    fs.writeFileSync(dir + "/main.index", index);
+  }
+
+  const IS_DAMAGED = "its files are damaged: ";
+
+  const DAMAGED: Array<[string, (dir: string) => void, string, (dir: string) => void]> = [
+    ["a corrupt main.index", (dir) => fs.writeFileSync(dir + "/main.index", Buffer.alloc(16, 0xff)), IS_DAMAGED, () => {}],
+    ["a main.index of zeros", (dir) => fs.writeFileSync(dir + "/main.index", Buffer.alloc(32)), IS_DAMAGED, () => {}],
+    ["a main.index cut short", (dir) => fs.appendFileSync(dir + "/main.index", Buffer.alloc(5)), IS_DAMAGED, () => {}],
+    ["a slot past its file", slot_past_its_file, IS_DAMAGED, () => {}],
+    ["a slot of an impossible day", (dir) => {
+      const index = fs.readFileSync(dir + "/main.index");
+      index.writeUInt32LE(0xffffffff, 8);
+      fs.writeFileSync(dir + "/main.index", index);
+    }, IS_DAMAGED, () => {}],
+    ["a log line of garbage", garble, IS_DAMAGED, () => {}],
+    ["a log shorter than its saved end", first_line_only, IS_DAMAGED, () => {}],
+    ["a saved end that is no number", (dir) => saved_end(dir, "main", [JSON.parse(fs.readFileSync(dir + "/view.json", "utf8")).main[0], "x" as any]), IS_DAMAGED, () => {}],
+    ["a dir it can't write", (dir) => fs.chmodSync(dir, 0o555), "EACCES", (dir) => fs.chmodSync(dir, 0o755)],
   ];
 
-  for (const [name, spoil, mend] of DAMAGED) {
+  for (const [name, spoil, says, mend] of DAMAGED) {
     test("a failed /resume pick of " + name + " leaves the old chat answering", async () => {
       const cwd = fresh();
       const dir = await older(cwd);
@@ -470,9 +497,11 @@ describe("input errors", () => {
       Tui.input(chat.t, "older");
       Tui.input(chat.t, "\r");
       const note = await noted(chat.t);
-      expect(note).toContain("can't be opened");
+      expect(note).toContain("can't be opened: " + says);
       expect(note).not.toContain("Invalid Date");
       expect(note).not.toContain("JSON Parse");
+      expect(note).not.toContain("out of range");
+      expect(note).not.toContain("a bug in unii");
       expect(chat.t.session.id).toBe(id);
       expect(chat.shown()).toContain("reply to this chat");
       expect(fs.readFileSync(chat.t.session.dir + "/lock", "utf8")).toBe(String(process.pid));
@@ -498,6 +527,99 @@ describe("input errors", () => {
     await noted(chat.t);
     await until(() => chat.shown().includes("the turn went on"));
     expect(chat.shown()).toContain("the turn went on");
+    await Tui.leave(chat.t);
+  });
+
+  async function planted(chat: ReturnType<typeof started>, err: () => unknown): Promise<string> {
+    const key = Tui.key;
+    (Tui as any).key = () => {
+      throw err();
+    };
+    chat.t.notes = [];
+    Tui.input(chat.t, "x");
+    const note = await noted(chat.t);
+    (Tui as any).key = key;
+    return note;
+  }
+
+  test("a code bug a key runs says so in its note, and errors.log holds its time and stack, for the owner alone", async () => {
+    const chat = started(fresh());
+    const note = await planted(chat, () => new TypeError("planted in a key"));
+    expect(note).toContain("planted in a key");
+    expect(note).toContain("a bug in unii");
+    expect(note).toContain(LOG);
+    const log = fs.readFileSync(LOG, "utf8");
+    expect(log).toMatch(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+Z\nTypeError: planted in a key\n/);
+    expect(log).toContain("Tui.test.ts");
+    expect(fs.statSync(LOG).mode & 0o777).toBe(0o600);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("a code error carrying an ERR_ code is a bug, not a system error", async () => {
+    const chat = started(fresh());
+    expect(await planted(chat, () => {
+      try {
+        Buffer.alloc(-1);
+      } catch (err) {
+        return err;
+      }
+    })).toContain("a bug in unii");
+    await Tui.leave(chat.t);
+  });
+
+  test("an error the user can act on keeps its note as it was, and is logged too", async () => {
+    const chat = started(fresh());
+    expect(await planted(chat, () => new Error("planted for the user"))).toBe("planted for the user");
+    expect(fs.readFileSync(LOG, "utf8")).toContain("Error: planted for the user\n");
+    chat.t.notes = [];
+    const { dir } = chat.t.session;
+    fs.chmodSync(dir, 0o555);
+    Tui.input(chat.t, "/model haiku\r");
+    const denied = await noted(chat.t);
+    fs.chmodSync(dir, 0o755);
+    expect(denied).toContain("EACCES");
+    expect(denied).not.toContain("a bug in unii");
+    expect(fs.readFileSync(LOG, "utf8")).toContain("EACCES");
+    await Tui.leave(chat.t);
+  });
+
+  test("an errors.log that can't be written never masks the note, and no note points at it", async () => {
+    const chat = started(fresh());
+    const kept = fs.existsSync(LOG) ? fs.readFileSync(LOG) : Buffer.alloc(0);
+    fs.rmSync(LOG, { force: true });
+    fs.mkdirSync(LOG);
+    const note = await planted(chat, () => new TypeError("planted, no log"));
+    fs.rmdirSync(LOG);
+    fs.writeFileSync(LOG, kept, { mode: 0o600 });
+    expect(note).toContain("planted, no log");
+    expect(note).toContain("a bug in unii");
+    expect(note).not.toContain(LOG);
+    await answered(chat, "still here");
+    await Tui.leave(chat.t);
+  });
+
+  test("a code bug opening a session is a bug's note, never damage, and that chat stays unheld", async () => {
+    const cwd = fresh();
+    const dir = await older(cwd);
+    const chat = started(cwd);
+    const { id } = chat.t.session;
+    const open = Local.open;
+    (Local as any).open = () => {
+      throw new TypeError("planted in an open");
+    };
+    Tui.input(chat.t, "/resume\r");
+    Tui.input(chat.t, "older");
+    Tui.input(chat.t, "\r");
+    const note = await noted(chat.t);
+    (Local as any).open = open;
+    expect(note).not.toContain("damaged");
+    expect(note).toContain("planted in an open");
+    expect(note).toContain("a bug in unii");
+    expect(fs.readFileSync(LOG, "utf8")).toContain("TypeError: planted in an open\n");
+    expect(chat.t.session.id).toBe(id);
+    expect(fs.existsSync(dir + "/lock")).toBe(false);
+    await answered(chat, "still here");
     await Tui.leave(chat.t);
   });
 
@@ -560,6 +682,98 @@ describe("input errors", () => {
     await answered(chat, "still here");
     await Tui.leave(chat.t);
   });
+
+  for (const [name, text] of [["an object with no parts", "{}"], ["a number", "5"], ["parts of no pairs", '{"parts":[null]}'], ["a seen with no parts", '{"parts":[],"seen":{}}']]) {
+    test("a /resume pick whose view.json is " + name + " rebuilds from the logs, as an unreadable one does", async () => {
+      const cwd = fresh();
+      const dir = await older(cwd);
+      fs.writeFileSync(dir + "/view.json", text);
+      const chat = started(cwd);
+      const { id } = chat.t.session;
+      Tui.input(chat.t, "/resume\r");
+      Tui.input(chat.t, "older");
+      Tui.input(chat.t, "\r");
+      await until(() => chat.t.session.id !== id || chat.t.notes.length > 0);
+      expect(chat.t.notes.join(" ")).toBe("");
+      expect(chat.shown()).toContain("reply to an older chat");
+      await answered(chat, "goes on");
+      await Tui.leave(chat.t);
+    });
+  }
+
+  const REBUILT: Array<[string, (src: string) => void]> = [
+    ["a main.index cut short and no view.json", (src) => {
+      fs.rmSync(src + "/view.json");
+      fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1));
+    }],
+    ["a main.index of whole entries of garbage and no view.json", (src) => {
+      fs.rmSync(src + "/view.json");
+      fs.writeFileSync(src + "/main.index", Buffer.alloc(16, 0xff));
+    }],
+    ["a garbage main.index and a view.json that can't be parsed", (src) => {
+      fs.writeFileSync(src + "/view.json", "{ not json");
+      fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1));
+    }],
+    ["a garbage main.index and a saved end of zero", (src) => {
+      saved_end(src, "main", [0, 0]);
+      fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1));
+    }],
+    ["a garbage tree.index and a saved end of zero", (src) => {
+      saved_end(src, "tree", [0, 0]);
+      fs.writeFileSync(src + "/tree.index", Buffer.alloc(37, 1));
+    }],
+  ];
+
+  for (const [name, spoil] of REBUILT) {
+    test("an import of " + name + " rebuilds from the logs, says the lines it has, and answers", async () => {
+      const src = await older(fresh());
+      spoil(src);
+      const chat = started(fresh());
+      const first = chat.t.session;
+      Tui.input(chat.t, "/import " + src + "\r");
+      await until(() => chat.t.session.id !== first.id && chat.t.notes.length > 0);
+      expect(chat.t.notes.join(" ")).toContain("Imported " + src + " as a new session: 2 lines.");
+      expect(chat.shown()).toContain("reply to an older chat");
+      await answered(chat, "goes on");
+      await Tui.leave(chat.t);
+    });
+  }
+
+  test("an import of a garbage main.index with no logs and no view.json is an empty chat that answers", async () => {
+    const src = fresh();
+    fs.writeFileSync(src + "/main.index", Buffer.alloc(16, 0xff));
+    const chat = started(fresh());
+    const first = chat.t.session;
+    Tui.input(chat.t, "/import " + src + "\r");
+    await until(() => chat.t.session.id !== first.id && chat.t.notes.length > 0);
+    expect(chat.t.notes.join(" ")).toContain("Imported " + src + " as a new session: 0 lines.");
+    await answered(chat, "goes on");
+    await Tui.leave(chat.t);
+  });
+
+  const REFUSED: Array<[string, (src: string) => void]> = [
+    ["a view.json that is a directory", (src) => {
+      fs.rmSync(src + "/view.json");
+      fs.mkdirSync(src + "/view.json");
+    }],
+    ["a log shorter than its saved end", first_line_only],
+    ["a garbage main.index with a saved end", (src) => fs.writeFileSync(src + "/main.index", Buffer.alloc(37, 1))],
+  ];
+
+  for (const [name, spoil] of REFUSED) {
+    test("an import of " + name + " is refused before any copy", async () => {
+      const cwd = fresh();
+      const src = await older(fresh());
+      spoil(src);
+      const chat = started(cwd);
+      const before = fs.readdirSync(Store.home(cwd));
+      Tui.input(chat.t, "/import " + src + "\r");
+      expect(await noted(chat.t)).toContain("no chat to import at " + src + ": ");
+      expect(fs.readdirSync(Store.home(cwd))).toEqual(before);
+      await answered(chat, "still here");
+      await Tui.leave(chat.t);
+    });
+  }
 
   test("a good /import shows its history, says so, and answers", async () => {
     const cwd = fresh();
