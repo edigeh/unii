@@ -7,7 +7,9 @@
 // lock (its pid), so two never write one chat. An import copies a chat
 // the server kept (config.DIR/users/<id>) into a new session, reading the
 // source only, so its history and memory tree carry over and the server's
-// stay as they were.
+// stay as they were. It is copied into <id>.<pid>.part and renamed when
+// whole: a session's dir is whole or isn't there, and what a killed import
+// leaves is a .part naming a dead pid, which Store.sweep removes.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -45,6 +47,9 @@ export const ERRORS = config.DIR + "/errors.log";
 // a chat's files an import copies (up/, posts' bodies, never: they are
 // unlinked once open)
 const FILES = ["main", "tree", "main.index", "tree.index", "view.json", "docs", "import.json"];
+
+// a copy not yet a session: an import's staging dir
+const PART = ".part";
 
 // the bytes read from a log's end to find its last message
 const TAIL = 65536;
@@ -96,7 +101,7 @@ export namespace Store {
     try {
       const meta = JSON.parse(fs.readFileSync(dir + "/meta.json", "utf8"));
       const index = dir + "/main.index";
-      const count = fs.existsSync(index) ? fs.statSync(index).size / SLOT : 0;
+      const count = fs.existsSync(index) ? Math.floor(fs.statSync(index).size / SLOT) : 0;
       const time = fs.existsSync(index) ? fs.statSync(index).mtimeMs : fs.statSync(dir + "/meta.json").mtimeMs;
       return { id: path.basename(dir), dir, cwd: meta.cwd, made: meta.made, from: meta.from, print: meta.print === true, last: Store.last(dir), count, time };
     } catch {
@@ -108,7 +113,7 @@ export namespace Store {
   export function list(cwd: string): Session[] {
     const home = Store.home(cwd);
     const ids = fs.existsSync(home) ? fs.readdirSync(home) : [];
-    const all = ids.map((id) => Store.read(home + "/" + id)).filter((s): s is Session => s !== null);
+    const all = ids.filter((id) => !id.endsWith(PART)).map((id) => Store.read(home + "/" + id)).filter((s): s is Session => s !== null);
     return all.sort((a, b) => b.time - a.time);
   }
 
@@ -150,6 +155,7 @@ export namespace Store {
   export function log_error(err: any): boolean {
     const stacks = [err, ...(err?.cause === undefined ? [] : [err.cause])].map((e) => String(e?.stack ?? e));
     try {
+      fs.mkdirSync(config.DIR, { recursive: true, mode: 0o700 });
       fs.appendFileSync(ERRORS, new Date().toISOString() + "\n" + stacks.join("\n") + "\n\n", { mode: 0o600 });
       return true;
     } catch {
@@ -182,11 +188,19 @@ export namespace Store {
   // -----
 
   // the pid of the live unii holding a session; null: none (a lock a
-  // killed one left is stale)
+  // killed one left is stale, an empty one too: it died writing it)
   export function holder(dir: string): number | null {
     try {
-      const pid = Number(fs.readFileSync(dir + "/lock", "utf8"));
-      if (pid === process.pid) {
+      return Store.other(Number(fs.readFileSync(dir + "/lock", "utf8")));
+    } catch {
+      return null;
+    }
+  }
+
+  // a pid, if it is another live process; -1: one not ours to signal
+  export function other(pid: number): number | null {
+    try {
+      if (pid === process.pid || pid === 0) {
         return null;
       }
       process.kill(pid, 0);
@@ -218,9 +232,10 @@ export namespace Store {
 
   // the server's chat at `src` (a users/<id> dir) copied into a new
   // session of `cwd`; the source is only read. Throws if it holds no chat
-  // or a damaged one. Its meta.json comes last and a failed copy is removed,
-  // so a list never sees it half made, even if a crash cuts the copy
+  // or a damaged one. A failed copy is removed, and one a crash cuts is
+  // never under the session's name
   export function bring(src: string, cwd: string): Session {
+    Store.sweep(cwd);
     if (!fs.existsSync(src + "/main.index")) {
       throw new Error("no chat to import at " + src);
     }
@@ -228,16 +243,39 @@ export namespace Store {
     if (flaw !== null) {
       throw new Error("no chat to import at " + src + ": " + flaw);
     }
-    const dir = Store.home(cwd) + "/" + Store.id();
-    fs.mkdirSync(dir, { recursive: true });
+    const id = Store.id();
+    const dir = Store.home(cwd) + "/" + id;
+    const part = dir + "." + process.pid + PART;
+    fs.mkdirSync(part, { recursive: true });
     try {
       for (const name of FILES.filter((name) => fs.existsSync(src + "/" + name))) {
-        fs.cpSync(src + "/" + name, dir + "/" + name, { recursive: true, preserveTimestamps: true });
+        fs.cpSync(src + "/" + name, part + "/" + name, { recursive: true, preserveTimestamps: true });
       }
-      return Store.stamp(dir, cwd, src);
+      const session = Store.stamp(part, cwd, src);
+      fs.renameSync(part, dir);
+      return { ...session, id, dir };
     } catch (err) {
-      Store.drop(dir);
+      Store.drop(part);
       throw err;
+    }
+  }
+
+  // the copies dead imports left in a working dir's home, each named for its
+  // process. This process's own reads as dead, so it runs only before this
+  // process starts a copy. One that can't be removed is in nobody's way:
+  // logged, and it stops nothing
+  export function sweep(cwd: string): void {
+    const home = Store.home(cwd);
+    const ids = fs.existsSync(home) ? fs.readdirSync(home) : [];
+    for (const id of ids.filter((id) => id.endsWith(PART))) {
+      const dir = home + "/" + id;
+      if (Store.other(Number(id.split(".").at(-2))) === null) {
+        try {
+          Store.drop(dir);
+        } catch (err) {
+          Store.log_error(new Error("the dead import's copy at " + dir + " can't be removed", { cause: err }));
+        }
+      }
     }
   }
 
