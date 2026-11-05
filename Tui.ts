@@ -78,6 +78,7 @@ export type Tui = {
   closing  : boolean;
   attached : boolean;
   given    : boolean;
+  switching: Promise<void> | null;
 };
 
 type Timer = ReturnType<typeof setTimeout>;
@@ -113,6 +114,9 @@ const MENU_ROWS = 10;
 // hidden (the editor draws its own)
 const TERM_ON  = "\x1b[?2004h\x1b[>1u\x1b[>4;1m\x1b[?25l";
 const TERM_OFF = "\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?25h\x1b[0m";
+
+// what a switch says of the turn it stopped, in the old log and on the new screen
+const STOPPED = "Stopped: another session opened.";
 
 // the vendors whose calls a plan pays (the costs shown are list prices)
 const PLANS = ["codex", "opencode-go"];
@@ -174,7 +178,7 @@ export namespace Tui {
     const t: Tui = {
       chat: null as unknown as Chat, session, items: [], earlier: 0, live: [], mind: "", ed: Editor.make(), keys: Keys.make(),
       render: Render.make(out, w, h), menu: null, login: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
-      frame: 0, started: 0, out, done, closing: false, attached: false, given: false,
+      frame: 0, started: 0, out, done, closing: false, attached: false, given: false, switching: null,
     };
     let opened: Opened;
     try {
@@ -253,25 +257,32 @@ export namespace Tui {
   // a session's chat opened and read, the chat on screen untouched: a
   // session that won't open fails here, held by no one
   export function open(t: Tui, session: Session): Opened {
+    let chat: Chat | null = null;
+    // a closed chat's turn may end after the next chat is on screen: what
+    // it writes stays in its log. Before enter only draws fire, and a draw follows it
+    const own = <A extends unknown[]>(hook: (...a: A) => void) => (...a: A) => {
+      if (t.chat === chat) {
+        hook(...a);
+      }
+    };
     const hooks = {
-      entry : (m: Shown) => Tui.entry(t, m),
-      live  : (live: Live[]) => {
+      entry : own((m: Shown) => Tui.entry(t, m)),
+      live  : own((live: Live[]) => {
         t.live = live.map((l) => ({ ...l }));
         Tui.draw(t);
-      },
-      mind  : (text: string) => {
+      }),
+      mind  : own((text: string) => {
         t.mind = text;
         Tui.draw(t);
-      },
-      state : () => Tui.draw(t),
-      ended : () => {
+      }),
+      state : own(() => Tui.draw(t)),
+      ended : own(() => {
         t.mind = "";
         Tui.draw(t);
-      },
-      fault : (why: string) => Tui.note(t, why),
+      }),
+      fault : own((why: string) => Tui.note(t, why)),
     };
     const notes: string[] = [];
-    let chat: Chat | null = null;
     try {
       if (!Store.lock(session.dir)) {
         session = Store.make(session.cwd);
@@ -373,6 +384,9 @@ export namespace Tui {
   export function key(t: Tui, k: Key): void | Promise<void> {
     if (t.closing) {
       return;
+    }
+    if (t.switching !== null) {
+      return t.switching.then(() => Tui.key(t, k));
     }
     const is = (name: string, mod: "ctrl" | "alt" | "" = "") => k.$ === "key" && k.name === name && (mod === "" ? !k.ctrl && !k.alt : k[mod]);
     if (is("c", "ctrl")) {
@@ -668,14 +682,36 @@ export namespace Tui {
 
   // another session in this terminal: it opens first, so one that won't
   // leaves this chat as it was; this chat closes before the new one's turn
-  // goes on, as closing kills every tool this process runs (Machine.end)
+  // goes on, as closing kills every tool this process runs (Machine.end).
+  // Keys wait till it is on screen (Tui.key); a failure reaches the caller
   export async function switch_to(t: Tui, s: Session): Promise<void> {
     const next = Tui.open(t, s);
-    Local.interrupt(t.chat, "Stopped: another session opened.");
-    await Local.close(t.chat);
-    Store.unlock(t.session.dir);
-    Tui.enter(t, next);
-    Tui.draw(t);
+    const busy = Local.interrupt(t.chat, STOPPED);
+    const run = Tui.swap(t, next, busy);
+    const free = () => {
+      t.switching = null;
+    };
+    t.switching = run.then(free, free);
+    return run;
+  }
+
+  // this chat closed and the next on screen, even if the close fails; a
+  // quit meanwhile (Tui.leave) has it closed instead
+  export async function swap(t: Tui, next: Opened, busy: boolean): Promise<void> {
+    try {
+      await Local.close(t.chat);
+    } finally {
+      Store.unlock(t.session.dir);
+      if (t.closing) {
+        await Local.close(next.chat).finally(() => Store.unlock(next.session.dir));
+      } else {
+        Tui.enter(t, next);
+        if (busy) {
+          t.notes.push(STOPPED);
+        }
+        Tui.draw(t);
+      }
+    }
   }
 
   export async function bring(t: Tui, arg: string): Promise<void> {
@@ -722,6 +758,7 @@ export namespace Tui {
     t.menu = null;
     Tui.show(t);
     [t.timer, t.flush, t.spin].forEach((x) => x !== null && clearTimeout(x));
+    await t.switching;
     await Local.close(t.chat);
     Store.unlock(t.session.dir);
     Tui.restore(t);
