@@ -10,6 +10,7 @@
 // stay as they were.
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as config from "./Config.ts";
 import { Memory } from "./Memory.ts";
@@ -154,6 +155,27 @@ export namespace Store {
     } catch {
       return false;
     }
+  }
+
+  // an error of the system (ENOENT, EACCES): it says what to fix. ERR_ codes
+  // are Node's own, for a bad value passed: a code bug
+  export function system(err: any): boolean {
+    return typeof err?.code === "string" && /^E(?!RR_)[A-Z]/.test(err.code);
+  }
+
+  // an error a chat goes on from, logged: what its note says. A code bug's
+  // says so, and where its stack went
+  export function report(err: any): string {
+    const logged = Store.log_error(err);
+    const text = String(err?.message ?? err);
+    const actionable = err instanceof Error && err.name === "Error" || Store.system(err);
+    return actionable ? text : text + " (a bug in unii" + (logged ? "; its stack is in " + Store.tilde(ERRORS) : "") + ")";
+  }
+
+  // a path as the user writes it, under ~
+  export function tilde(p: string): string {
+    const h = os.homedir();
+    return p === h ? "~" : p.startsWith(h + "/") ? "~" + p.slice(h.length) : p;
   }
 
   // Locks

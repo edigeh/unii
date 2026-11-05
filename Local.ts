@@ -10,7 +10,8 @@
 // the summaries build in the background, JOBS at a time (Memory.ts). What
 // runs is saved as it changes (Memory.ts `work`), so a turn a crash cut
 // goes on when the chat opens next (Local.resume). Every message is
-// logged as it comes, and flushed (Disk.ts).
+// logged as it comes, and flushed (Disk.ts). What fails in a turn or a
+// summary has its stack in errors.log (Store.report); the chat goes on.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -23,6 +24,7 @@ import { INT, Machine, TOOLS, spec, type Spec } from "./Machine.ts";
 import { Memory, type Share } from "./Memory.ts";
 import { Pick } from "./Pick.ts";
 import { Price } from "./Price.ts";
+import { Store } from "./Store.ts";
 import PROMPT from "./prompt.txt" with { type: "text" };
 
 // Types
@@ -37,7 +39,7 @@ export type Shown = { id: number; kind: Kind; text: string; date: string; more: 
 
 // what the chat tells its terminal (or print mode): each message logged,
 // what streams, a thought (shown, never logged), its state, a call's end,
-// what a turn failed to write (the log may be what fails: told, not logged)
+// what a turn's end failed on (the log may be what fails: told, not logged)
 export type Hooks = {
   entry : (msg: Shown) => void;
   live  : (live: Live[]) => void;
@@ -125,6 +127,7 @@ export namespace Local {
   export function open(dir: string, cwd: string, hooks: Hooks): Chat {
     fs.mkdirSync(dir, { recursive: true });
     const mem = Memory.load(dir, () => Local.share(chat));
+    mem.fault = Store.log_error;
     const pick = Pick.load(mem.pick, config.OFFER, config.PICK);
     const chat: Chat = {
       cwd, mem, pick, hooks, busy: false, call: null, check: null, sent: [], wait: [], halt: new AbortController(),
@@ -186,7 +189,7 @@ export namespace Local {
     }
     chat.wait.push(msg);
     if (!chat.busy) {
-      Local.turn(chat).catch((err) => chat.hooks.fault(String(err?.message ?? err)));
+      Local.turn(chat).catch((err) => chat.hooks.fault(Store.report(err)));
     }
   }
 
@@ -198,7 +201,7 @@ export namespace Local {
         go = await Local.call(chat);
       }
     } catch (err: any) {
-      Local.failed(chat, String(err?.message ?? err));
+      Local.failed(chat, Store.report(err));
     } finally {
       const why = chat.halt.signal.aborted ? chat.halt.signal.reason : null;
       chat.call  = null;
