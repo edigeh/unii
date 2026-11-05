@@ -21,6 +21,7 @@ import { Keys, WAIT, type Key } from "./Keys.ts";
 import type { Live } from "./Live.ts";
 import { Local, type Chat, type Shown } from "./Local.ts";
 import { Login, type Flow, type Provider } from "./Login.ts";
+import { Machine } from "./Machine.ts";
 import { Memory } from "./Memory.ts";
 import { Pick, type Model } from "./Pick.ts";
 import { Price } from "./Price.ts";
@@ -191,6 +192,12 @@ export namespace Tui {
     const crash = (err: unknown) => {
       Tui.restore(t);
       process.stderr.write("unii: " + String((err as any)?.stack ?? err) + "\n");
+      // after the terminal and the stack: a failure here costs neither
+      try {
+        Machine.end();
+      } catch (failed) {
+        process.stderr.write("unii: tools may still run: " + String(failed) + "\n");
+      }
       process.exit(1);
     };
     process.on("uncaughtException", crash);
