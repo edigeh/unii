@@ -13,9 +13,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
-
-const DIR = fs.mkdtempSync(os.tmpdir() + "/unii-tui-");
-process.env.UNII_DIR = DIR;
+import { DIR } from "./scratch.stub.ts";
 
 const { Keys, WAIT } = await import("./Keys.ts");
 const { Editor } = await import("./Editor.ts");
@@ -276,6 +274,7 @@ describe("interactive mode", () => {
   });
 
   test("/login lists the providers; one chosen waits for its code, which signs it in", async () => {
+    fs.rmSync(DIR + "/auth.json", { force: true });
     const { out } = screen(100, 40);
     const t = Tui.make(Store.make(CWD), out, 100, 40, () => {});
     Tui.send(t, "/login");

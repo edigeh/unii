@@ -12,9 +12,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-const DIR = fs.mkdtempSync(os.tmpdir() + "/unii-store-");
-process.env.UNII_DIR = DIR;
+import { DIR } from "./scratch.stub.ts";
 
 const { Store } = await import("./Store.ts");
 const { Local } = await import("./Local.ts");
