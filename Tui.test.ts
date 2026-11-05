@@ -637,6 +637,42 @@ describe("input errors", () => {
     await Tui.leave(chat.t);
   });
 
+  for (const w of [80, 30]) {
+    test("a turn waiting on a failing summary shows why on its own row at width " + w + ", whatever its reason holds", async () => {
+      const term = term_make(w, 40);
+      const t = Tui.make(Store.make(fresh()), (s) => term_write(term, s), w, 40, () => {});
+      const ask = Memory.ask;
+      (Memory as any).ask = () => {
+        throw new Error("\n\x1b[31mplanted " + "long ".repeat(100) + "\nsecond line");
+      };
+      const wide = "word ".repeat(2000);
+      let shown: string[] = [];
+      try {
+        Tui.input(t, "first " + wide + "\r");
+        await until(() => !t.chat.busy, 10000);
+        Tui.input(t, "second " + wide + "\r");
+        await until(() => Local.stuck(t.chat) !== "", 10000);
+        Tui.show(t);
+        shown = term_screen(term);
+      } finally {
+        (Memory as any).ask = ask;
+      }
+      const status = shown.findIndex((l) => l.includes("summarizing"));
+      expect(width(plain(shown[status]))).toBeLessThan(w);
+      expect(shown[status + 1]).toContain("  failed, trying again:");
+      expect(width(plain(shown[status + 1]))).toBeLessThan(w);
+      expect(shown[status + 2], "the next row is the rule").toContain("──");
+      if (w === 80) {
+        expect(shown[status]).toContain("(esc to stop)");
+        expect(shown[status + 1]).toContain("planted long long");
+      }
+      expect(shown.join("\n")).not.toContain("second line");
+      expect(t.notes).toEqual([]);
+      await until(() => !t.chat.busy, 10000);
+      await Tui.leave(t);
+    }, 30000);
+  }
+
   test("a code bug opening a session is a bug's note, never damage, and that chat stays unheld", async () => {
     const cwd = fresh();
     const dir = await older(cwd);

@@ -25,17 +25,19 @@ type Hooks = import("./Local.ts").Hooks;
 const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-cwd-"));
 const LOG = DIR + "/errors.log";
 
-function hooks(log: string[] = []): Hooks & { log: string[]; ends: boolean[]; faults: string[] } {
+function hooks(log: string[] = []): Hooks & { log: string[]; ends: boolean[]; faults: string[]; summaries: string[] } {
   const ends: boolean[] = [];
   const faults: string[] = [];
+  const summaries: string[] = [];
   return {
-    log, ends, faults,
+    log, ends, faults, summaries,
     entry : (m) => log.push(m.kind + ": " + m.text),
     live  : () => {},
     mind  : () => {},
     state : () => {},
     ended : (end) => ends.push(end.ok),
     fault : (why) => faults.push(why),
+    summary : (why) => summaries.push(why),
   };
 }
 
@@ -355,6 +357,92 @@ test("a summary that keeps failing tells its reason once, lets the terminal run,
   expect(Memory.first(chat.mem)).toBe(4);
   await Local.close(chat);
 }, AGAIN + 10000);
+
+test("a turn waiting on a summary that fails says why, until it builds", async () => {
+  STUB.script = () => [{ t: "text", x: "answered" }];
+  const h = hooks();
+  const chat = Local.open(DIR + "/s17", CWD, h);
+  const ask = Memory.ask;
+  (Memory as any).ask = () => {
+    throw new Error("planted, on and on");
+  };
+  const say = async (text: string) => {
+    Local.say(chat, text + " " + "word ".repeat(2000));
+    const until = Date.now() + 10000;
+    while (Local.stuck(chat) === "" && chat.busy && Date.now() < until) {
+      await Bun.sleep(10);
+    }
+  };
+  let why = "";
+  let doing = "";
+  try {
+    await say("first");
+    await idle(chat, AGAIN + 5000);
+    await say("second");
+    why = Local.stuck(chat);
+    doing = Local.doing(chat);
+  } finally {
+    (Memory as any).ask = ask;
+  }
+  expect(why).toBe("planted, on and on");
+  expect(doing).toBe("summarizing earlier messages");
+  expect(h.faults, "no fault of the turn").toEqual([]);
+  await idle(chat, AGAIN + 5000);
+  expect(Local.stuck(chat)).toBe("");
+  expect(h.log.filter((l) => l === "unii: answered")).toHaveLength(2);
+  const clear = Date.now() + AGAIN + 5000;
+  while (chat.mem.failed.size > 0 && Date.now() < clear) {
+    await Bun.sleep(10);
+  }
+  Local.say(chat, "third");
+  expect(Local.stuck(chat)).toBe("");
+  await idle(chat);
+  await Local.close(chat);
+}, 3 * AGAIN + 20000);
+
+test("a node's reason is told once as it keeps failing, and again if a later node fails on it", async () => {
+  const told = () => logged().split("planted, node by node").length - 1;
+  const before = told();
+  const chat = Local.open(DIR + "/s18", CWD, hooks());
+  const built = async (n: number) => {
+    plant(Memory, "ask", new Error("planted, node by node"));
+    Memory.push(chat.mem, Array.from({ length: 4 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(2000) })));
+    const until = Date.now() + AGAIN + 5000;
+    while (Memory.first(chat.mem) < n && Date.now() < until) {
+      await Bun.sleep(10);
+    }
+    expect(Memory.first(chat.mem)).toBeGreaterThanOrEqual(n);
+  };
+  await built(4);
+  expect(told() - before).toBe(1);
+  await built(8);
+  expect(told() - before).toBe(2);
+  await Local.close(chat);
+}, 2 * AGAIN + 15000);
+
+test("a job's end that keeps failing is told once, again after one ends well, and is no reason a turn waits", async () => {
+  const told = () => logged().split("planted at a job's end").length - 1;
+  const before = told();
+  const chat = Local.open(DIR + "/s19", CWD, hooks());
+  const lines = () => Array.from({ length: 8 }, (_, k) => ({ kind: "user" as const, text: k + " " + "word ".repeat(2000) }));
+  const fit = Memory.fit;
+  const failing = async () => {
+    Memory.push(chat.mem, lines());
+    (Memory as any).fit = () => {
+      throw new Error("planted at a job's end");
+    };
+    await Bun.sleep(300);
+    (Memory as any).fit = fit;
+  };
+  await failing();
+  expect(told() - before, "told once").toBe(1);
+  expect(chat.mem.failed.size, "no node failed").toBe(0);
+  Memory.push(chat.mem, lines());
+  await Bun.sleep(300);
+  await failing();
+  expect(told() - before, "told again").toBe(2);
+  await Local.close(chat);
+}, 15000);
 
 test("summaries a stop cuts are no errors", async () => {
   const chat = Local.open(DIR + "/s14", CWD, hooks());
