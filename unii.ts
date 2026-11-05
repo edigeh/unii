@@ -121,7 +121,7 @@ export async function print(cwd: string, text: string): Promise<number> {
     failed = true;
     process.stderr.write("unii: " + why + "\n");
   };
-  const chat = Local.open(session.dir, cwd, { entry, live: () => {}, mind: () => {}, state: () => {}, ended: (end) => ends.push(end), fault });
+  const chat = Local.open(session.dir, cwd, { entry, live: () => {}, mind: () => {}, state: () => {}, ended: (end) => ends.push(end), fault, summary: (why) => process.stderr.write("unii: summary failed: " + why + "\n") });
   // a crash never reaches Local.close below: its tools die with it all the same
   process.on("exit", () => chat.closed || Machine.end());
   const stop = () => Local.interrupt(chat, "Stopped by a signal.");

@@ -281,6 +281,7 @@ export namespace Tui {
         Tui.draw(t);
       }),
       fault : own((why: string) => Tui.note(t, why)),
+      summary : () => {},
     };
     const notes: string[] = [];
     try {
@@ -843,7 +844,12 @@ export namespace Tui {
         out.push(...mind_lines(t.mind, w));
       }
       const secs = Math.floor((Date.now() - (t.started || Date.now())) / 1000);
-      out.push(paint([[SPINNER[t.frame % SPINNER.length] + " ", S.cyan], [Local.doing(t.chat) + "… " + secs + "s", S.none], ["  (esc to stop)", S.dim]]));
+      const status = cut(Local.doing(t.chat) + "… " + secs + "s", w - 3);
+      out.push(paint([[SPINNER[t.frame % SPINNER.length] + " ", S.cyan], [status, S.none], [width(status) + 18 < w ? "  (esc to stop)" : "", S.dim]]));
+      const why = clean(Local.stuck(t.chat)).trim().split("\n")[0];
+      if (why !== "") {
+        out.push(paint([[cut("  failed, trying again: " + why, w - 1), S.yell]]));
+      }
     }
     for (const note of t.notes) {
       out.push(...wrap([[note, S.yell]], w));

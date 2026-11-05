@@ -39,7 +39,8 @@ export type Shown = { id: number; kind: Kind; text: string; date: string; more: 
 
 // what the chat tells its terminal (or print mode): each message logged,
 // what streams, a thought (shown, never logged), its state, a call's end,
-// what a turn's end failed on (the log may be what fails: told, not logged)
+// what a turn's end failed on (the log may be what fails: told, not logged),
+// what a summary failed on (logged: it tries again, and no turn fails for it)
 export type Hooks = {
   entry : (msg: Shown) => void;
   live  : (live: Live[]) => void;
@@ -47,6 +48,7 @@ export type Hooks = {
   state : () => void;
   ended : (end: End) => void;
   fault : (why: string) => void;
+  summary : (why: string) => void;
 };
 
 // the tokens a turn's last request read (its context) and wrote, and
@@ -114,6 +116,9 @@ export const SYSTEM = PARTS.reduce((text, [part, now]) => {
 // the project's own instructions, read from the working dir as a turn begins
 const PROJECT = ["AGENTS.md", "CLAUDE.md"];
 
+// what the status line says of a turn that waits on summaries
+const WAITING = "summarizing earlier messages";
+
 const OWN: Spec[] = [
   spec("zoom", "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A long text comes in pages from character at, saying where to go on.", { id: INT, n: INT, at: INT }, ["id"]),
   spec("date", "The date and time of message id.", { id: INT }, ["id"]),
@@ -127,7 +132,7 @@ export namespace Local {
   export function open(dir: string, cwd: string, hooks: Hooks): Chat {
     fs.mkdirSync(dir, { recursive: true });
     const mem = Memory.load(dir, () => Local.share(chat));
-    mem.fault = Store.log_error;
+    mem.fault = (err) => hooks.summary(Store.report(err));
     const pick = Pick.load(mem.pick, config.OFFER, config.PICK);
     const chat: Chat = {
       cwd, mem, pick, hooks, busy: false, call: null, check: null, sent: [], wait: [], halt: new AbortController(),
@@ -464,6 +469,12 @@ export namespace Local {
     return Array.from({ length: mem.count - from }, (_, k) => Memory.message(mem, from + k)!).map(({ i, kind, text, date, more }) => ({ id: i, kind, text, date, more: more === true }));
   }
 
+  // why a summary fails, if the turn waits on summaries: "" if none does
+  export function stuck(chat: Chat): string {
+    const [why] = chat.mem.failed.values();
+    return Local.doing(chat) === WAITING ? why ?? "" : "";
+  }
+
   // what the status line says of the turn: its model's call, the tool it
   // runs, the summaries it waits on, or none
   export function doing(chat: Chat): string {
@@ -479,7 +490,7 @@ export namespace Local {
     if (chat.call !== null) {
       return chat.live.length > 0 ? "writing" : "thinking";
     }
-    return "summarizing earlier messages";
+    return WAITING;
   }
 
 }
