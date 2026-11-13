@@ -29,7 +29,8 @@ How it works
   diffs, and tool output folds.
 - **Saved as it goes.** Sessions are kept per working directory under
   ~/.unii/sessions, written as each message arrives. A turn cut by a
-  crash goes on when unii starts again.
+  crash goes on when unii starts again, or, with `--resume`, when the
+  picker closes on its session.
 
 The design is in the header comment of each file. Start with Local.ts
 (the chat and its turns), Memory.ts (the tree and the view), AskAI.ts
@@ -73,7 +74,9 @@ without it does not keep it out.
 Use
 ---
 
-    unii                 go on with the latest session of this directory
+    unii                 go on with the latest session of this directory;
+                         if it won't open, a new one says why and it stays
+                         on disk
     unii --resume        pick a session of this directory
     unii --new           start a new session
     unii --import [dir]  import a UniiChat server's chat (default

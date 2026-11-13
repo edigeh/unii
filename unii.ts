@@ -6,11 +6,15 @@
 // working directory (Store.ts), written as each message comes.
 //
 //   unii                 the latest session of this directory (a turn a
-//                        crash cut goes on), or a new one
-//   unii --resume        the sessions of this directory to pick from
+//                        crash cut goes on), or a new one; a new one too,
+//                        saying why, if the latest won't open
+//   unii --resume        the sessions of this directory to pick from; a
+//                        turn a crash cut goes on when the picker closes
+//                        on its session
 //   unii --new           a new session
 //   unii --import [dir]  the server's chat (default ~/.unii/users/1) as a
-//                        new session: its history and memory tree
+//                        new session: its history and memory tree; none
+//                        is kept if it won't open
 //   unii -p "message"    print mode: the reply on stdout, the rest on
 //                        stderr; exits 1 if the turn didn't end well
 //                        ("-" or none: the message read from stdin)
@@ -21,7 +25,7 @@ import type { End } from "./AskAI.ts";
 import * as config from "./Config.ts";
 import { Local, type Shown } from "./Local.ts";
 import { Machine } from "./Machine.ts";
-import { Store, type Session } from "./Store.ts";
+import { ERRORS, Store, type Session } from "./Store.ts";
 
 // Constants
 // =========
@@ -54,30 +58,39 @@ export async function main(argv: string[]): Promise<number> {
       const src = (arg ?? config.DIR + "/users/1").replace(/^~(?=\/|$)/, os.homedir());
       const s = Store.bring(src, cwd);
       process.stderr.write("unii: imported " + src + " as session " + s.id + " (" + s.count + " lines)\n");
-      return interactive(s, false);
+      try {
+        return await interactive(s);
+      } catch (err) {
+        // it didn't open: a crash after that goes through Tui.attach's handler
+        Store.drop(s.dir);
+        throw err;
+      }
     }
     case "--new": {
-      return interactive(Store.make(cwd), false);
+      Store.sweep(cwd);
+      return interactive(Store.make(cwd));
     }
     case "--resume":
     case "-r": {
-      return interactive(Store.latest(cwd) ?? Store.make(cwd), true);
+      Store.sweep(cwd);
+      return interactive(Store.latest(cwd) ?? Store.make(cwd), { chosen: true, resume: true });
     }
     case undefined: {
-      return interactive(Store.latest(cwd) ?? Store.make(cwd), false);
+      Store.sweep(cwd);
+      return interactive(Store.latest(cwd) ?? Store.make(cwd), { chosen: true });
     }
   }
   process.stderr.write("unii: no option " + flag + "\n" + USAGE);
   return 2;
 }
 
-async function interactive(session: Session, resume: boolean): Promise<number> {
+async function interactive(session: Session, opts: { chosen?: boolean; resume?: boolean } = {}): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write("unii: the chat needs a terminal; unii -p \"message\" runs one turn without\n");
     return 2;
   }
   const { Tui } = await import("./Tui.ts");
-  return Tui.run(session, { resume });
+  return Tui.run(session, opts);
 }
 
 // Print
@@ -134,7 +147,9 @@ async function stdin(): Promise<string> {
 
 if (import.meta.main) {
   main(process.argv.slice(2)).then((code) => process.exit(code), (err) => {
-    process.stderr.write("unii: " + String(err?.message ?? err) + "\n");
+    const logged = Store.log_error(err);
+    const plain = err instanceof Error && err.name === "Error";
+    process.stderr.write("unii: " + String(err?.message ?? err) + (logged && !plain ? " (its stack is in " + ERRORS + ")" : "") + "\n");
     process.exit(1);
   });
 }
