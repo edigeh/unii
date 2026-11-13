@@ -8,7 +8,8 @@
 // a 200-line paste goes as one message, Esc stops a reply, a resize mid
 // stream leaves every row whole; what the user's input runs and fails, a
 // bad path, a failing disk, a damaged session, a code bug, is a note in a
-// chat that goes on, its stack in errors.log.
+// chat that goes on, its stack in errors.log; a switch of session while a
+// reply runs, or typed over.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -787,5 +788,187 @@ describe("input errors", () => {
     expect(fs.existsSync(first.dir + "/lock")).toBe(false);
     await answered(chat, "goes on");
     await Tui.leave(chat.t);
+  });
+
+  describe("switching sessions", () => {
+    const STOPPED = "Stopped: another session opened.";
+
+    // Local.close as it is, its first call answered only once `open` runs
+    function held() {
+      const real = Local.close;
+      let calls = 0;
+      let open = () => {};
+      const gate = new Promise<void>((ok) => (open = ok));
+      (Local as any).close = async (chat: unknown) => {
+        await real(chat as any);
+        if (calls++ === 0) {
+          await gate;
+        }
+      };
+      return { open, restore: () => ((Local as any).close = real) };
+    }
+
+    function locked(cwd: string): string[] {
+      return fs.readdirSync(Store.home(cwd)).filter((id) => fs.existsSync(Store.home(cwd) + "/" + id + "/lock"));
+    }
+
+    test("/new during a reply says so on the new screen, and the old log keeps it", async () => {
+      STUB.script = () => [{ t: "wait", ms: 30000 }];
+      const chat = started(fresh());
+      const first = chat.t.session;
+      Tui.input(chat.t, "go\r");
+      await until(() => chat.t.chat.call !== null);
+      Tui.input(chat.t, "/new\r");
+      await until(() => chat.t.session.id !== first.id);
+      expect(chat.t.items).toEqual([]);
+      expect(chat.shown()).toContain(STOPPED);
+      await until(() => Store.last(first.dir)?.text === STOPPED);
+      expect(Store.last(first.dir)?.text).toBe(STOPPED);
+      await Tui.leave(chat.t);
+    });
+
+    test("/new with no reply running says nothing was stopped", async () => {
+      const chat = started(fresh());
+      const first = chat.t.session;
+      Tui.input(chat.t, "/new\r");
+      await until(() => chat.t.session.id !== first.id);
+      expect(chat.shown()).not.toContain(STOPPED);
+      await Tui.leave(chat.t);
+    });
+
+    test("a message typed while the old chat closes goes to the new chat", async () => {
+      const slow = held();
+      try {
+        const chat = started(fresh());
+        const first = chat.t.session;
+        STUB.script = () => [{ t: "text", x: "reply to typed" }];
+        Tui.input(chat.t, "/new\r");
+        Tui.input(chat.t, "typed");
+        Tui.input(chat.t, "\r");
+        await Bun.sleep(20);
+        expect(Store.last(first.dir)).toBe(null);
+        slow.open();
+        await until(() => chat.shown().includes("reply to typed"));
+        expect(chat.t.session.id).not.toBe(first.id);
+        expect(Store.last(chat.t.session.dir)?.text).toBe("reply to typed");
+        expect(Store.last(first.dir)).toBe(null);
+        await Tui.leave(chat.t);
+      } finally {
+        slow.restore();
+      }
+    });
+
+    test("two quick /new end on the last one made, a message after them in it, only it locked", async () => {
+      const slow = held();
+      try {
+        const cwd = fresh();
+        const chat = started(cwd);
+        const first = chat.t.session;
+        STUB.script = () => [{ t: "text", x: "reply to typed" }];
+        Tui.input(chat.t, "/new\r/new\rtyped\r");
+        await Bun.sleep(20);
+        slow.open();
+        await until(() => chat.shown().includes("reply to typed"), 1000);
+        const ids = fs.readdirSync(Store.home(cwd)).sort();
+        expect(ids.length).toBe(3);
+        expect(ids[0]).toBe(first.id);
+        expect(chat.t.session.id).toBe(ids[2]);
+        expect(Store.last(Store.home(cwd) + "/" + ids[2])?.text).toBe("reply to typed");
+        expect(Store.last(Store.home(cwd) + "/" + ids[1])).toBe(null);
+        expect(Store.last(first.dir)).toBe(null);
+        expect(locked(cwd)).toEqual([ids[2]]);
+        await Tui.leave(chat.t);
+      } finally {
+        slow.restore();
+      }
+    });
+
+    test("a resumed chat left at once stops, its turn not on the next screen", async () => {
+      const cwd = fresh();
+      STUB.script = () => [{ t: "wait", ms: 30000 }];
+      const cut = started(cwd);
+      Tui.input(cut.t, "the cut turn\r");
+      await until(() => cut.t.chat.call !== null);
+      await Tui.leave(cut.t);
+      await until(() => !cut.t.chat.busy);
+      const chat = started(cwd);
+      const first = chat.t.session;
+      STUB.script = () => [{ t: "wait", ms: 50 }, { t: "text", x: "reply of the resumed turn" }];
+      const slow = held();
+      try {
+        Tui.input(chat.t, "/resume\rNo reply\r/new\r");
+        await Bun.sleep(20);
+        slow.open();
+        await until(() => chat.t.session.id !== first.id && chat.t.session.id !== cut.t.session.id, 500);
+        await Bun.sleep(150);
+        expect(chat.t.session.id).not.toBe(cut.t.session.id);
+        expect(chat.shown()).not.toContain("reply of the resumed turn");
+        expect(Store.last(cut.t.session.dir)?.text).toBe(STOPPED);
+        expect(locked(cwd)).toEqual([chat.t.session.id]);
+        await Tui.leave(chat.t);
+      } finally {
+        slow.restore();
+      }
+    });
+
+    test("what a closed chat writes late stays in its log, off the new screen", async () => {
+      const chat = started(fresh());
+      const first = chat.t.session;
+      const old = chat.t.chat;
+      Tui.input(chat.t, "/new\r");
+      await until(() => chat.t.session.id !== first.id);
+      Local.push(old, "note", "late from the old chat");
+      expect(chat.t.items).toEqual([]);
+      expect(chat.shown()).not.toContain("late from the old chat");
+      expect(Store.last(first.dir)?.text).toBe("late from the old chat");
+      await Tui.leave(chat.t);
+    });
+
+    test("a close that fails lands on the new chat, the failure a note there", async () => {
+      const real = Local.close;
+      let fail = true;
+      (Local as any).close = async (chat: unknown) => {
+        await real(chat as any);
+        if (fail) {
+          fail = false;
+          throw new Error("the close failed");
+        }
+      };
+      try {
+        const cwd = fresh();
+        const chat = started(cwd);
+        const first = chat.t.session;
+        Tui.input(chat.t, "/new\r");
+        expect(await noted(chat.t)).toContain("the close failed");
+        expect(chat.t.session.id).not.toBe(first.id);
+        expect(chat.shown()).toContain("the close failed");
+        expect(locked(cwd)).toEqual([chat.t.session.id]);
+        await answered(chat, "goes on");
+        expect(Store.last(chat.t.session.dir)?.text).toBe("reply to goes on");
+        await Tui.leave(chat.t);
+      } finally {
+        (Local as any).close = real;
+      }
+    });
+
+    test("a quit during a switch enters nothing and leaves no session locked", async () => {
+      const slow = held();
+      try {
+        const cwd = fresh();
+        const chat = started(cwd);
+        const first = chat.t.session;
+        Tui.input(chat.t, "/new\r");
+        const left = Tui.leave(chat.t);
+        await Bun.sleep(20);
+        slow.open();
+        await left;
+        await Bun.sleep(20);
+        expect(fs.readdirSync(Store.home(cwd)).length).toBe(2);
+        expect(locked(cwd)).toEqual([]);
+        expect(chat.t.session.id).toBe(first.id);
+      } finally {
+        slow.restore();
+      }
+    });
   });
 });
