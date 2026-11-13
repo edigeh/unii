@@ -11,13 +11,14 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import type { FileSink } from "bun";
+import type { ReadableStreamDefaultReader as Reader } from "node:stream/web";
 import * as config from "./Config.ts";
 
 // Types
 // =====
 
 // the shell that flushes: what it reads, what it answered not yet read
-type Shell = { stdin: FileSink; out: ReadableStreamDefaultReader<Uint8Array>; got: string };
+type Shell = { stdin: FileSink; out: Reader<Uint8Array<ArrayBuffer>>; got: string };
 
 // Globals
 // =======

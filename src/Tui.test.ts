@@ -343,9 +343,9 @@ describe("interactive mode", () => {
 
     const real = globalThis.fetch;
     const claims = { "https://api.openai.com/profile": { email: "someone@example.com" } };
-    globalThis.fetch = (async () => new Response(JSON.stringify({
+    globalThis.fetch = Object.assign(async () => new Response(JSON.stringify({
       access_token: "x." + Buffer.from(JSON.stringify(claims)).toString("base64url") + ".y", refresh_token: "r", expires_in: 3600,
-    }), { status: 200 })) as typeof fetch;
+    }), { status: 200 }), { preconnect: real.preconnect });
     try {
       Tui.input(t, "the-code\r");
       await until(() => t.login === null);

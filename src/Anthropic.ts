@@ -89,7 +89,7 @@ export namespace Anthropic {
   export async function count(key: string, ask: Ask, body: any): Promise<number | null> {
     const { max_tokens, stream, ...rest } = body;
     const init = { method: "POST", headers: Anthropic.headers(key, ask), body: JSON.stringify(rest), signal: AbortSignal.timeout(10e3) };
-    const out = await fetch(COUNT, init).then((res) => res.json()).catch(() => null);
+    const out = await fetch(COUNT, init).then((res) => res.json() as Promise<{ input_tokens?: unknown }>).catch(() => null);
     return typeof out?.input_tokens === "number" ? out.input_tokens : null;
   }
 

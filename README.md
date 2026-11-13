@@ -167,8 +167,9 @@ the view), `src/AskAI.ts` (model calls and the cache) and `src/Tui.ts`
 Development
 -----------
 
-    bun install      # Bun type definitions, for editors
-    bun run test     # bun test --isolate
+    bun install          # Bun type definitions and TypeScript
+    bun run typecheck    # tsc -p ., strict, over src/
+    bun run test         # bun test --isolate
 
 The tests run on a stubbed model (`src/wire.stub.ts`) and a stubbed
 terminal (`src/term.stub.ts`): the agent loop, sessions and imports,
