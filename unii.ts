@@ -20,6 +20,7 @@ import * as os from "node:os";
 import type { End } from "./AskAI.ts";
 import * as config from "./Config.ts";
 import { Local, type Shown } from "./Local.ts";
+import { Machine } from "./Machine.ts";
 import { Store, type Session } from "./Store.ts";
 
 // Constants
@@ -108,9 +109,12 @@ export async function print(cwd: string, text: string): Promise<number> {
     process.stderr.write("unii: " + why + "\n");
   };
   const chat = Local.open(session.dir, cwd, { entry, live: () => {}, mind: () => {}, state: () => {}, ended: (end) => ends.push(end), fault });
+  // a crash never reaches Local.close below: its tools die with it all the same
+  process.on("exit", () => chat.closed || Machine.end());
   const stop = () => Local.interrupt(chat, "Stopped by a signal.");
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  process.on("SIGHUP", stop);
   Local.say(chat, text);
   while (chat.busy) {
     await Bun.sleep(20);
