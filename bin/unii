@@ -1,5 +1,5 @@
 #!/bin/sh
-# unii: the terminal coding harness (unii.ts), one process holding the
+# unii: the terminal coding harness (src/unii.ts), one process holding the
 # chat, its memory tree and the agent loop; no server. The terminal's
 # settings are kept as they were before it starts and set back when it
 # ends, however it ends (a kill -9 too, which no handler of its sees).
@@ -8,7 +8,7 @@ REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 if [ -t 0 ]; then
   SAVED="$(stty -g)"
 fi
-bun "$REPO/unii.ts" "$@"
+bun "$REPO/src/unii.ts" "$@"
 CODE=$?
 if [ -n "$SAVED" ]; then
   stty "$SAVED"

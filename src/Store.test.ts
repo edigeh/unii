@@ -20,7 +20,7 @@ const { Local } = await import("./Local.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 
 const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd-"));
-const COPY = path.join(import.meta.dir, "work/data-copy/users/1");
+const COPY = path.join(import.meta.dir, "../work/data-copy/users/1");
 const SRC = DIR + "/users/1";
 
 const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {}, fault: () => {}, summary: () => {} };
