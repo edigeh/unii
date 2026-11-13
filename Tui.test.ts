@@ -716,6 +716,36 @@ describe("input errors", () => {
     }, 30000);
   }
 
+  test("what a layer under the chat says of a failure is a note with its stack logged, never a line under the frame", async () => {
+    const { Disk } = await import("./Disk.ts");
+    const term = term_make(80, 20);
+    const t = Tui.make(Store.make(fresh()), (s) => term_write(term, s), 80, 20, () => {});
+    const flush = Disk.flush;
+    const real = console.error;
+    const said: string[] = [];
+    console.error = (...args: unknown[]) => void said.push(args.join(" "));
+    try {
+      Tui.hear(t);
+      (Disk as any).flush = () => Promise.reject(new Error("planted flush failure"));
+      Tui.input(t, "hello\r");
+      await until(() => t.notes.length > 0 || said.length > 0);
+      (Disk as any).flush = flush;
+      Tui.show(t);
+      expect(said, "nothing reached the console").toEqual([]);
+      expect(term_screen(term).join("\n")).toContain("disk: a flush failed: planted flush failure");
+      expect(fs.readFileSync(LOG, "utf8")).toContain("Error: disk: a flush failed: planted flush failure\n");
+      console.error("disk: a flush failed: planted flush failure");
+      expect(t.notes.filter((note) => note.includes("a flush failed")).length, "said again, it adds no note").toBe(1);
+      await until(() => !t.chat.busy);
+      await Tui.leave(t);
+      console.error("said after the chat left");
+      expect(said, "the console is as it was").toEqual(["said after the chat left"]);
+    } finally {
+      (Disk as any).flush = flush;
+      console.error = real;
+    }
+  });
+
   test("a code bug opening a session is a bug's note, never damage, and that chat stays unheld", async () => {
     const cwd = fresh();
     const dir = await older(cwd);

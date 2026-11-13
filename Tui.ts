@@ -11,7 +11,8 @@
 // The terminal is given back as it was on any way out: a quit, a signal,
 // an error no one caught. What the user's input runs and fails is a note
 // in a chat that goes on, its stack in errors.log (Tui.attempt); only what
-// escapes that is fatal.
+// escapes that is fatal. What the layers under the chat write to the
+// console is a note too (Tui.hear): the terminal holds the frame alone.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -78,6 +79,7 @@ export type Tui = {
   closing  : boolean;
   attached : boolean;
   given    : boolean;
+  said     : typeof console.error | null;
   switching: Promise<void> | null;
 };
 
@@ -178,7 +180,7 @@ export namespace Tui {
     const t: Tui = {
       chat: null as unknown as Chat, session, items: [], earlier: 0, live: [], mind: "", ed: Editor.make(), keys: Keys.make(),
       render: Render.make(out, w, h), menu: null, login: null, pick: 0, open: false, notes: [], quit: 0, timer: null, flush: null, spin: null,
-      frame: 0, started: 0, out, done, closing: false, attached: false, given: false, switching: null,
+      frame: 0, started: 0, out, done, closing: false, attached: false, given: false, said: null, switching: null,
     };
     let opened: Opened;
     try {
@@ -209,6 +211,7 @@ export namespace Tui {
     stdin.setRawMode?.(true);
     stdin.setEncoding("utf8");
     stdin.resume();
+    Tui.hear(t);
     t.out(TERM_ON);
     stdin.on("data", (chunk: string) => Tui.input(t, chunk));
     process.stdout.on("resize", () => {
@@ -236,12 +239,30 @@ export namespace Tui {
     process.on("exit", () => Tui.restore(t));
   }
 
-  // the terminal as it was: keys, paste, cursor, cooked mode
+  // what a layer under the chat says of a failure it goes on from (a
+  // flush, a busy model: console.error) is a note, logged, while the chat
+  // holds the terminal: a line written under the frame would move it. One
+  // the notes hold already is not said again
+  export function hear(t: Tui): void {
+    t.said = console.error;
+    console.error = (...said: unknown[]) => {
+      const text = clean(said.map(String).join(" "));
+      if (!t.notes.includes(text)) {
+        Tui.note(t, Store.report(new Error(text)));
+      }
+    };
+  }
+
+  // the terminal as it was: keys, paste, cursor, cooked mode, the console
   export function restore(t: Tui): void {
     if (t.given) {
       return;
     }
     t.given = true;
+    if (t.said !== null) {
+      console.error = t.said;
+      t.said = null;
+    }
     if (t.attached && process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);
