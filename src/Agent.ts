@@ -174,7 +174,7 @@ export namespace Agent {
   }
 
   // a wire's key: its sign-in's (omp), or the one set for it
-  export async function key(wire: Wire<unknown>, ask: Ask): Promise<string> {
+  export async function key<S>(wire: Wire<S>, ask: Ask): Promise<string> {
     if (wire.auth) {
       return wire.auth(ask);
     }
@@ -536,7 +536,7 @@ export namespace Agent {
       signal  : run.abort.signal,
       timeout : false,
     } as RequestInit);
-    const msg = await res.json();
+    const msg = await res.json() as { result: any; error?: { message: string } };
     if (msg.error) {
       throw new Error(method + ": " + msg.error.message);
     }

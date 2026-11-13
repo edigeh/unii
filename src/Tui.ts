@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import type { Kind } from "./AskAI.ts";
 import * as config from "./Config.ts";
-import { S, clean, cut, message, paint, tool as tool_lines, width, wrap } from "./Draw.ts";
+import { S, clean, cut, message, paint, tool as tool_lines, width, wrap, type Run } from "./Draw.ts";
 import { Editor } from "./Editor.ts";
 import { Keys, WAIT, type Key } from "./Keys.ts";
 import type { Live } from "./Live.ts";
@@ -468,7 +468,7 @@ export namespace Tui {
     }
   }
 
-  export function ctrl_c(t: Tui): void {
+  export function ctrl_c(t: Tui): void | Promise<void> {
     if (t.menu !== null) {
       const menu = t.menu;
       t.menu = null;
