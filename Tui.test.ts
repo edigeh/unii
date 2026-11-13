@@ -183,6 +183,18 @@ describe("render", () => {
     Render.draw(r, frame);
     expect(term_all(term)).toEqual(frame);
   });
+
+  test("a line wider than the screen takes one row, cut at the edge", () => {
+    const term = term_make(20, 6);
+    const r = Render.make((s) => term_write(term, s), 20, 6);
+    const long = "\x1b[33mspinner " + "word ".repeat(10) + "\x1b[0m";
+    for (let step = 0; step < 8; step++) {
+      Render.draw(r, ["head", long + step, "wide " + "界".repeat(12) + step, "tail " + step]);
+      const shown = term_screen(term);
+      expect(shown.slice(0, 4), "step " + step).toEqual(["head", "spinner word word …", "wide 界界界界界界…", "tail " + step]);
+      expect(shown.slice(4)).toEqual(["", ""]);
+    }
+  });
 });
 
 describe("interactive mode", () => {
@@ -248,6 +260,37 @@ describe("interactive mode", () => {
     await until(() => !t.chat.busy);
     await Tui.leave(t);
   });
+
+  for (const w of [26, 20, 12, 5]) {
+    test("a terminal " + w + " columns wide shows each line of the frame on one row", async () => {
+      STUB.script = () => [{ t: "wait", ms: 30000 }];
+      const { term, out } = screen(w, 30);
+      const t = Tui.make(Store.make(CWD), out, w, 30, () => {});
+      const rows = () => {
+        Tui.show(t);
+        const frame = Tui.frame_lines(t).map(plain).slice(-30);
+        const shown = term_screen(term);
+        expect(shown.slice(frame.length).every((row) => row === ""), "no row under the frame").toBe(true);
+        for (const [k, line] of frame.entries()) {
+          expect(width(shown[k]), "row " + k + " fits").toBeLessThan(w);
+          expect(line.startsWith(shown[k].replace(/…$/, "").trimEnd()), "row " + k + " is line " + k + ": " + shown[k]).toBe(true);
+        }
+        return shown;
+      };
+      rows();
+      Tui.input(t, "go\r");
+      await until(() => t.chat.busy);
+      for (let k = 0; k < 5; k++) {
+        t.frame++;
+        const shown = rows();
+        expect(shown.filter((row) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(row)).length, "one status row").toBe(1);
+      }
+      Tui.input(t, "\x1b");
+      await until(() => !t.chat.busy);
+      expect(rows().filter((row) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(row)).length, "no status row left").toBe(0);
+      await Tui.leave(t);
+    });
+  }
 
   test("the model picker shows each model's price and context, and the one marked's facts", async () => {
     const { out } = screen(100, 40);
