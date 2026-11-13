@@ -111,7 +111,8 @@ type Saved = Kept & { seen?: Kept; main: End; tree: End; pick: object | null; go
 // compactions share with the chat's turns; pay: what pays them (none:
 // free); made, acted: told of each node built, of each act indexed;
 // fault: told of what a summary failed on, but a stop's cut; failed: the
-// last such reason told
+// reason of each node that last failed, until it builds; ended: the reason
+// a job's end last failed on, until one ends well
 export type Memory = {
   dir    : string;
   fds    : Map<string, number>;
@@ -136,7 +137,8 @@ export type Memory = {
   pay?   : Pay;
   made?  : (l: number, i: number) => void;
   fault? : (err: unknown) => void;
-  failed?: string;
+  failed: Map<number, string>;
+  ended?: string;
   acted  : (id: string, ans: object) => void;
 };
 
@@ -209,7 +211,7 @@ export namespace Memory {
     const mem: Memory = {
       dir, fds: new Map(), count: 0, open: 0, pick: null, goal: null, work: [], nodes: new Map(), agents: new Map(), ready: [[], []], ends: { main: [0, 0], tree: [0, 0] },
       view: { parts: [], size: 0, batch: false, high: HIGH }, seen: { parts: [], size: 0, batch: false, high: SEEN },
-      busy: new Map(), sides: new Map(), calls: new Map(), hold: [null, "paused"], done: false, wait: new Set(), share, acted,
+      busy: new Map(), failed: new Map(), sides: new Map(), calls: new Map(), hold: [null, "paused"], done: false, wait: new Set(), share, acted,
     };
     try {
       Memory.fill(mem);
@@ -736,28 +738,38 @@ export namespace Memory {
   // a node cut (its side held, or the chat ended: Memory.stop) builds as
   // it goes on; call: one running for it already (Memory.take)
   // a failed build holds its place AGAIN ms: it starts again as fast as it
-  // fails, with nothing else let run. Each new reason is told once
+  // fails, with nothing else let run. A reason no node holds is told once
   export function job(mem: Memory, l: number, i: number, text: string, call: Call | null = null): void {
     const key = Memory.slot(l, i);
-    const fail = (err: unknown) => {
-      const why = String((err as any)?.message ?? err);
-      if (why !== mem.failed) {
-        mem.failed = why;
-        console.error("compactor: node " + l + "/" + i + ": " + why);
-        if (!mem.done) {
-          mem.fault?.(err);
-        }
+    const reason = (err: unknown) => String((err as any)?.message ?? err);
+    const tell = (err: unknown) => {
+      if (mem.fault === undefined) {
+        console.error("compactor: node " + l + "/" + i + ": " + reason(err));
+      } else if (!mem.done) {
+        mem.fault(err);
       }
     };
     mem.busy.set(key, Memory.side(mem, l, i));
-    Memory.build(mem, l, i, text, call).catch((err) => {
-      fail(err);
+    Memory.build(mem, l, i, text, call).then(() => {
+      mem.failed.delete(key);
+    }, (err) => {
+      const told = [...mem.failed.values()].includes(reason(err));
+      mem.failed.set(key, reason(err));
+      if (!told) {
+        tell(err);
+      }
       return mem.done ? undefined : Bun.sleep(AGAIN);
     }).then(() => {
       mem.busy.delete(key);
       Memory.pump(mem);
       Memory.fit(mem);
-    }).catch(fail);
+      mem.ended = undefined;
+    }).catch((err) => {
+      if (reason(err) !== mem.ended) {
+        mem.ended = reason(err);
+        tell(err);
+      }
+    });
   }
 
   // no node starts again (the chat moves: Memory.give)

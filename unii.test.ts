@@ -23,7 +23,7 @@ const { term_make, term_write, term_all } = await import("./term.stub.ts");
 type Session = import("./Store.ts").Session;
 
 const LOG = DIR + "/errors.log";
-const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {}, fault: () => {} };
+const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {}, fault: () => {}, summary: () => {} };
 
 beforeAll(stub_install);
 afterAll(stub_remove);

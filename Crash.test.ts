@@ -184,3 +184,52 @@ test("print mode whose terminal closes kills the running job and exits 1", async
   expect(await job_outlived(c.pid_file), "the job outlived the hangup").toBe(false);
   expect(code).toBe(1);
 }, 30000);
+
+const FAILING = DIR + "/failing.preload.ts";
+fs.writeFileSync(FAILING, `
+import { STUB, stub_install } from ${JSON.stringify(ROOT + "/wire.stub.ts")};
+import { Memory } from ${JSON.stringify(ROOT + "/Memory.ts")};
+stub_install();
+STUB.script = () => [{ t: "text", x: "answered" }];
+Memory.ask = () => {
+  throw new Error("planted in a summary");
+};
+`);
+
+test("a failing summary leaves the chat's frame alone: its reason goes to errors.log", async () => {
+  const c = scratch("frame");
+  let out = "";
+  const text = new TextDecoder();
+  const proc = Bun.spawn([process.execPath, "--preload=" + FAILING, ROOT + "/unii.ts", "--new"], {
+    cwd: c.cwd,
+    env: c.env,
+    terminal: { cols: 120, rows: 40, data: (_, chunk) => { out += text.decode(chunk); } },
+  });
+  await until(() => out.includes("message unii"), "the editor's prompt");
+  proc.terminal!.write("word ".repeat(2000));
+  await Bun.sleep(100);
+  proc.terminal!.write("\r");
+  const log = c.env.UNII_DIR + "/errors.log";
+  await until(() => fs.existsSync(log) && fs.readFileSync(log, "utf8").includes("planted in a summary"), "the reason logged");
+  await Bun.sleep(200);
+  proc.terminal!.write("\x04");
+  expect(await proc.exited).toBe(0);
+  proc.terminal!.close();
+  expect(out).not.toContain("compactor:");
+  expect(fs.readFileSync(log, "utf8").split("planted in a summary").length - 1, "logged once").toBe(1);
+}, 30000);
+
+test("a failing summary in print mode says why on stderr, once, and the turn still ends well", async () => {
+  const c = scratch("print-summary");
+  const proc = Bun.spawn([process.execPath, "--preload=" + FAILING, ROOT + "/unii.ts", "-p", "word ".repeat(2000)], {
+    cwd: c.cwd,
+    env: c.env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  expect(await proc.exited).toBe(0);
+  expect(out).toContain("answered");
+  expect(err.split("summary failed: planted in a summary").length - 1).toBe(1);
+}, 30000);
