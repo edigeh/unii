@@ -8,10 +8,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
-import * as os from "node:os";
-
-const DIR = fs.mkdtempSync(os.tmpdir() + "/unii-login-");
-process.env.UNII_DIR = DIR;
+import { DIR } from "./scratch.stub.ts";
 
 const { Login } = await import("./Login.ts");
 
