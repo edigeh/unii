@@ -784,7 +784,7 @@ export namespace Tui {
   // ----
 
   export function cols(t: Tui): number {
-    return Math.max(10, t.render.w - 1);
+    return Math.max(10, Render.cols(t.render));
   }
 
   // a frame soon: at most one each FRAME ms

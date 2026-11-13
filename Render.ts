@@ -6,8 +6,11 @@
 // scrolled off the top stay in the terminal's scrollback as they were; one
 // of those that changed is redrawn only as far as the screen shows it. A
 // resize redraws all, the scrollback cleared, at the new width, so no
-// line keeps a wrap of the old one. Each write is one synchronized update
+// line keeps a wrap of the old one. A line takes one row: one wider than
+// the screen is cut at its edge. Each write is one synchronized update
 // (DEC 2026), so a terminal that knows it never shows half a frame.
+
+import { fit } from "./Draw.ts";
 
 // Types
 // =====
@@ -49,8 +52,15 @@ export namespace Render {
     }
   }
 
+  // the columns a line may take: the screen's but its last, which a
+  // terminal wraps at
+  export function cols(r: Render): number {
+    return Math.max(1, r.w - 1);
+  }
+
   // the frame drawn: all of it if fresh, else from its first change
-  export function draw(r: Render, lines: string[]): void {
+  export function draw(r: Render, frame: string[]): void {
+    const lines = frame.map((l) => fit(l, Render.cols(r)));
     if (r.fresh) {
       // the first: what the screen showed pushed into the scrollback; a
       // redraw: the scrollback cleared, as it holds lines of the old width
