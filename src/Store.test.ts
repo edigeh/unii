@@ -20,7 +20,7 @@ const { Local } = await import("./Local.ts");
 const { STUB, stub_install, stub_remove } = await import("./wire.stub.ts");
 
 const CWD = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd-"));
-const COPY = path.join(import.meta.dir, "work/data-copy/users/1");
+const COPY = path.join(import.meta.dir, "../work/data-copy/users/1");
 const SRC = DIR + "/users/1";
 
 const hooks = { entry: () => {}, live: () => {}, mind: () => {}, state: () => {}, ended: () => {}, fault: () => {}, summary: () => {} };
@@ -195,7 +195,7 @@ test("a failed copy leaves nothing", () => {
 
 test("a dead import's copy that can't be removed stops no import, and is logged", () => {
   const cwd = fs.realpathSync(fs.mkdtempSync(os.tmpdir() + "/unii-store-cwd8-"));
-  const stuck = stale_copy(Store.home(cwd), "stuck.part", "999999");
+  const stuck = stale_copy(Store.home(cwd), "stuck.999999.part");
   fs.chmodSync(stuck + "/main", 0o555);
   const s = Store.bring(SRC, cwd);
   expect(Store.latest(cwd)!.id).toBe(s.id);

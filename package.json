@@ -1,8 +1,27 @@
 {
   "name": "unii",
+  "version": "0.1.0",
+  "description": "A terminal coding agent whose chat never ends: one local process holding the chat, its memory tree and the agent loop.",
+  "license": "Apache-2.0",
   "private": true,
-  "bin": { "unii": "bin/unii" },
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edigeh/unii.git"
+  },
+  "engines": {
+    "bun": ">=1.4"
+  },
+  "bin": {
+    "unii": "bin/unii"
+  },
   "scripts": {
-    "test": "bun test --isolate"
+    "start": "bun src/unii.ts",
+    "test": "bun test --isolate",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
   }
 }

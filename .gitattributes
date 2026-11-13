@@ -1,0 +1,3 @@
+* text=auto eol=lf
+bin/unii text eol=lf
+bun.lock linguist-generated=true

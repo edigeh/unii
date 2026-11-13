@@ -206,7 +206,7 @@ export namespace OpenAI {
     form.append("file", audio, "voice." + audio.type.split(/[/;]/)[1]);
     const init = { method: "POST", headers: { authorization: "Bearer " + config.KEYS.openai }, body: form };
     const res = await fetch("https://api.openai.com/v1/audio/transcriptions", init);
-    const out = await res.json().catch(() => ({}));
+    const out = await res.json().catch(() => ({})) as { text: string; usage: { seconds: number }; error?: { message: string } };
     if (!res.ok) {
       throw new Error("Transcription failed: " + (out.error?.message ?? "HTTP " + res.status));
     }
