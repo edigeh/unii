@@ -164,6 +164,29 @@ export function cut(s: string, w: number): string {
   return out + "…";
 }
 
+// a painted line cut to w columns, "…" at the cut, its styles kept and closed
+export function fit(line: string, w: number): string {
+  if (width(line) <= w) {
+    return line;
+  }
+  let out = "";
+  let used = 0;
+  for (const [, style, text] of line.matchAll(/(\x1b\[[0-9;?]*[ -\/]*[@-~])|([^\x1b]+)/g)) {
+    if (style !== undefined) {
+      out += style;
+      continue;
+    }
+    for (const g of graphemes(text)) {
+      if (used + width(g) > w - 1) {
+        return out + "…\x1b[0m";
+      }
+      out += g;
+      used += width(g);
+    }
+  }
+  return out;
+}
+
 // Markdown
 // ========
 
